@@ -1,0 +1,33 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "references": [
+    {
+      "path": "../../packages/contracts"
+    },
+    {
+      "path": "../../packages/agent-runtime"
+    },
+    {
+      "path": "../../packages/metadata"
+    },
+    {
+      "path": "../../packages/data-gateway"
+    },
+    {
+      "path": "../../packages/files"
+    },
+    {
+      "path": "../../packages/skills"
+    },
+    {
+      "path": "../../packages/llm-wiki"
+    }
+  ],
+  "include": [
+    "src/**/*.ts"
+  ]
+}

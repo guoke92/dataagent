@@ -1,0 +1,157 @@
+AGENT_CONFIG:
+  name: sampling_subagent
+  version: "1.0.0"
+  description: Data analysis workflow specialist for constructing candidate-user samples.
+  backend: langgraph
+  type: react
+  max_iter: 4000
+  repetition_leniency: 100.0
+
+MODEL:
+  chat_model:
+    model_type: chat
+    provider: deepseek
+    params:
+      model: deepseek-v4-flash
+      temperature: 0.7
+
+SCENARIO:
+  chat:
+    instructions: Complete only the assigned sampling workflow step and produce a valid receipt.json.
+
+OVERRIDE_KEYS:
+  - ACTOR_LOOP
+  - HOOKS
+
+HOOKS:
+  agent:
+    pre:
+      - name: context_reference_rewriter
+    post:
+      - name: portraiter
+  nodes:
+    planner:
+      pre:
+        - dataagent.core.flex.hooks.pruner_v2.pruner
+    executor:
+      pre:
+      post:
+
+PRE_WORKFLOW: []
+ACTOR_LOOP:
+  - node: planner
+    module: dataagent.core.flex.nodes.planner.Planner
+    chat_model:
+      name: chat_model
+    prompt_template:
+      system:
+        - content: |
+            你是一个在数据分析工作流中运行的专业子代理。
+
+            - 只关注主代理分配的目标，不要越界。
+            - 每个步骤至少产出一个持久化物件（本地文件或供下游使用的 ClickHouse 表），工作流会拒绝空的产物列表。
+            - 当前任务工作区是你可以创建、修改、复制或移动文件的唯一位置。所有最终产物必须写入此处。
+            - 禁止在 `.metadata/`、其他 `subagents/<session>` 目录或只读共享输出区下创建、修改、复制或移动文件。平台会在完成后将验收通过的产物发布到共享输出区。
+            - 如果输入路径、前序步骤产物、任务指令或脚本默认值指向了其他输出目录，将该路径视为只读输入，将所有生成的输出重定向到当前任务工作区。
+            - 在当前任务工作区写入 `receipt.json`，仅包含两个顶层字段：`summary` 和 `artifacts`。
+            - 禁止添加 `results`、`metrics`、`next_steps`、`key_insights` 等其他顶层字段到 `receipt.json`。
+            - 每个 `receipt.json` 产物条目使用以下格式之一：
+              - 本地文件：`{"kind":"file","path":"relative/path/to/file.json","type":"json"}`。路径必须指向工作区内真实存在的文件。
+              - ClickHouse 表：`{"kind":"clickhouse_table","uri":"clickhouse://<output_database>/<table>","name":"<output_database>.<table>"}`。仅用于为下游创建的表。
+            - 不要将 ClickHouse 表写入共享输出区，也不要将其表示为本地文件产物。
+            - 如果无法完成目标，请说明阻塞原因，不要编造回执。
+
+            ## 原生套件运行时适配
+
+            - 本 agent 是流水线第一个子 agent，无上游依赖，不存在需要复制的前序产物。
+            - 步骤脚本通过 `skill/user_sampling/scripts/...` 路径加载；不要假设工作区根目录下有 `scripts/` 目录。
+            - 禁止在该共享输出区中创建、修改、复制或移动文件。
+
+            # 采样 Subagent
+
+            负责 pipeline **step1（采样）**。必须先加载 **user_sampling** skill；流程、参数、步骤顺序和交付契约以该 Skill 及其 `scripts/step1_x` 文档为唯一权威。
+
+            > 通用 workspace / receipt 格式 / 共享输出区规则见上文基线。
+            > 以下只规定运行时安全与资源访问边界，不重复采样业务规则。
+
+            ## 运行时硬约束
+
+            <下面的约束非常重要!!!/>
+            1. **ClickHouse 唯一通道**：业务 SQL **仅**允许 `submit_resource_job` → `poll_job` → `collect_job`（`resource_id="clickhouse"`）。**严禁**用 Bash/shell、`curl`、`wget`、`python`/`requests`/`urllib`/`clickhouse_connect`/`clickhouse-driver` 或任何客户端直连 ClickHouse。失败时只允许修正 SQL 后重提 MCP，或按 Skill 写阻塞说明；禁止降级为直连旁路。
+            2. **语句白名单**：每次恰好一条 SQL，顶层关键字只能是 `CREATE` 或 `SELECT`。严禁 `INSERT` / `DROP` / `TRUNCATE` / `ALTER` / `DESCRIBE` / `DESC` / `SHOW` / `EXPLAIN` / `USE` / `FORMAT …` 后缀及多语句。覆盖旧表用单条 `CREATE OR REPLACE TABLE ... AS SELECT`，不可拆成「空表 + INSERT」。
+            3. **禁止自写执行脚本**：不得 `write`/`edit` 任何用于连库或执行采样的 `.py` / `.sh`；不得用 Bash 将 SQL 写到临时目录后执行。Bash 仅可用于当前 workspace 内的本地文件操作，以及运行 skill 自带脚本。
+            </上面的约束非常重要!!!>
+
+            具体查询顺序、语义落盘、schema 保真、采样比例、投影和定稿门禁均以 user_sampling Skill 对应步骤文档为准，不在本文件重复定义。
+  - node: executor
+    module: dataagent.core.flex.nodes.executor.Executor
+    max_tool_result_length: 100000000   # 基本不走 Executor 的 IR 替换/截断
+POST_WORKFLOW: []
+
+TOOLS:
+  local_functions:
+    - module: dataagent.actions.tools.local_tool.tools
+      function: bash
+      hooks:
+        post:
+          - dataagent.actions.tools.hooks.truncator.truncator
+
+    - module: dataagent.core.suite.builtin_suites.data_analysis.tools.semantic.client
+      function: semantic_download
+
+    - module: dataagent.actions.tools.local_tool.tools
+      function: read_file
+      hooks:
+        post:
+          - dataagent.actions.tools.hooks.truncator.truncator
+
+    - module: dataagent.actions.tools.local_tool.job_tools
+      function: submit_resource_job
+      hooks:
+        post:
+          - dataagent.actions.tools.hooks.truncator.truncator
+
+    - module: dataagent.actions.tools.local_tool.job_tools
+      function: collect_job
+      hooks:
+        post:
+          - dataagent.actions.tools.hooks.truncator.truncator
+
+  skills:
+    custom_dirs:
+      - core/suite/builtin_suites/data_analysis/skill
+  mcp_servers:
+    - server_id: data_analysis_semantic
+      transport_type: stdio
+      config:
+        command: python3
+        args: [-m, dataagent.core.suite.builtin_suites.data_analysis.tools.semantic.mcp_server]
+        env:
+          SEMANTIC_SERVICE_BASE_URL: $env{SEMANTIC_SERVICE_BASE_URL}
+
+RESOURCES:
+  - id: clickhouse
+    name: ClickHouse Query Pool
+    category: executable
+    transport: {type: mcp, url: http://127.0.0.1:8766/mcp}
+    operations: {submit: submit_job, poll: poll_job, collect: collect_job, cancel: cancel_job}
+    capacity: {total: 40, unit: query}
+    consumption: {sql_query: 1, "*": 1}
+
+GOVERNANCE:
+  invisibility:
+    - start_data_analysis_workflow
+    - advance_data_analysis_workflow
+    - control_data_analysis_workflow
+    - inspect_data_analysis_workflow
+    - submit_subagent
+    - poll_subagent
+    - collect_subagent
+    - cancel_subagent
+  policies:
+    - id: data_analysis_forbid_external_python
+      applies_to: [submit_resource_job]
+      address: dataagent.core.suite.builtin_suites.data_analysis.governance.resource_job_guard.data_analysis_forbid_external_python_policy
+
+CONTEXT:
+  recent_turns: 100000   # 基本永不触发历史 IR 替换
