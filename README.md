@@ -73,9 +73,9 @@ See the [v0.2.0 release notes](docs/en/releases/v0.2.0.md) for the complete capa
 
 Formal mode has two paths (do **not** run `npm run dev`). Docker / Compose is not provided in this release.
 
-### Recommended: Ubuntu / Debian one-click
+### Recommended: one-click (Linux / macOS / Windows)
 
-`./deploy.sh` generates configuration, installs dependencies, builds (Web, API, and TUI), and starts Web + API as a detached background process — closing the terminal does not stop the stack. The TUI is built and ready but is a foreground client: start it in another terminal with `./deploy.sh tui` (or `npm run start:tui`); it does **not** stay running with the stack. DataLink is an **external** component (not started by deploy) — connect it later via MCP in the Web UI if needed. No model key is required during deploy — create and enable a model profile in the Web UI after login. Does **not** support native Windows / macOS.
+`./deploy.sh` generates configuration, installs dependencies, builds (Web, API, and TUI), and starts Web + API as a detached background process — closing the terminal does not stop the stack. The TUI is built and ready but is a foreground client: start it in another terminal with `./deploy.sh tui` (or `npm run start:tui`); it does **not** stay running with the stack. DataLink is an **external** component (not started by deploy) — connect it later via MCP in the Web UI if needed. No model key is required during deploy — create and enable a model profile in the Web UI after login. Linux, macOS, and Windows Git Bash use `./deploy.sh`; Windows Command Prompt or PowerShell uses `deploy.cmd`.
 
 ```bash
 git clone https://github.com/datagallery-lab/datafoundry.git
@@ -102,9 +102,9 @@ Common management commands:
 
 Open `http://127.0.0.1:3000/login`, register or sign in, create an OpenAI-compatible model profile, then go to `/data-tasks`. For remote hosts set `AUTH_PUBLIC_BASE_URL`. Re-running `./deploy.sh deploy` uses a maintenance window (stop the managed process group before install/build).
 
-### Windows / macOS / other: manual npm
+### Manual npm
 
-On native Windows, macOS, or other non-Ubuntu/Debian hosts, use manual npm. Install and run in the same environment; on Windows, do not share `node_modules` between Windows and WSL.
+Use manual npm when you want to edit environment files by hand or split processes. Install and run in the same environment; on Windows, do not share `node_modules` between Windows and WSL.
 
 ```bash
 git clone https://github.com/datagallery-lab/datafoundry.git

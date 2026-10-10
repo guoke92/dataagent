@@ -44,15 +44,52 @@ test("./deploy.sh help delegates without installing when Node 22+ exists", () =>
   assert.doesNotMatch(result.stdout + result.stderr, /Install Node\.js|nodesource|apt-get install/i);
 });
 
-test("unsupported OS exits 1 with a precise message", async () => {
+async function writeOsRelease(contents) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "datafoundry-os-"));
   const osRelease = path.join(dir, "os-release");
-  await writeFile(osRelease, 'ID=fedora\nVERSION_ID="40"\n');
+  await writeFile(osRelease, contents);
+  return osRelease;
+}
+
+function linuxAptEnv(osRelease, extra = {}) {
+  return {
+    DATAFOUNDRY_UNAME_S: "Linux",
+    DATAFOUNDRY_UNAME_M: "x86_64",
+    DATAFOUNDRY_OS_RELEASE_FILE: osRelease,
+    ...extra
+  };
+}
+
+test("non-Debian Linux is accepted", async () => {
+  const osRelease = await writeOsRelease('ID=fedora\nVERSION_ID="40"\n');
   const result = runBash([DEPLOY_SH, "help"], {
-    env: { DATAFOUNDRY_OS_RELEASE_FILE: osRelease }
+    env: linuxAptEnv(osRelease)
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /deploy\s+Configure/);
+});
+
+test("macOS and Windows Git Bash are accepted", () => {
+  for (const uname of ["Darwin", "MINGW64_NT-10.0"]) {
+    const result = runBash([DEPLOY_SH, "help"], {
+      env: {
+        DATAFOUNDRY_UNAME_S: uname,
+        DATAFOUNDRY_UNAME_M: "arm64"
+      }
+    });
+    assert.equal(result.status, 0, `${uname}\n${result.stderr}`);
+  }
+});
+
+test("unsupported OS exits 1 with a precise message", () => {
+  const result = runBash([DEPLOY_SH, "help"], {
+    env: {
+      DATAFOUNDRY_UNAME_S: "FreeBSD",
+      DATAFOUNDRY_UNAME_M: "amd64"
+    }
   });
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /Unsupported operating system: fedora/);
+  assert.match(result.stderr, /Unsupported operating system: FreeBSD/);
 });
 
 test("unsupported architecture exits 1 with a precise message", async () => {
@@ -81,11 +118,12 @@ source "${DEPLOY_SH}"
 ensure_node_22 deploy --non-interactive
 echo SHOULD_NOT_REACH
 `;
+  const osRelease = await writeOsRelease("ID=ubuntu\n");
   const result = runBash(["-c", script], {
-    env: {
+    env: linuxAptEnv(osRelease, {
       PATH: `${fakePath}:/bin`,
       HOME: os.tmpdir()
-    },
+    }),
     input: ""
   });
   const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
@@ -101,13 +139,14 @@ test("interactive Node installation prints repository and command, then asks onc
     sudo: "#!/bin/bash\nexit 1\n",
     id: "#!/bin/bash\necho 1000\n"
   });
+  const osRelease = await writeOsRelease("ID=ubuntu\n");
   const result = runBash(
     ["-c", `source "${DEPLOY_SH}"; install_node_22 deploy`],
     {
-      env: {
+      env: linuxAptEnv(osRelease, {
         PATH: `${fakePath}:/bin:/usr/bin`,
         HOME: os.tmpdir()
-      },
+      }),
       input: "n\n"
     }
   );
@@ -125,13 +164,14 @@ test("--non-interactive never reads stdin and fails without root/passwordless su
     sudo: "#!/usr/bin/env bash\nexit 1\n",
     curl: "#!/usr/bin/env bash\necho unexpectedly-called >&2; exit 99\n"
   });
+  const osRelease = await writeOsRelease("ID=ubuntu\n");
   const result = runBash(
     ["-c", `source "${DEPLOY_SH}"; install_node_22 deploy --non-interactive; echo SHOULD_NOT_REACH`],
     {
-      env: {
+      env: linuxAptEnv(osRelease, {
         PATH: `${fakePath}:/bin:/usr/bin`,
         HOME: os.tmpdir()
-      },
+      }),
       input: "y\ny\ny\n"
     }
   );
@@ -139,6 +179,56 @@ test("--non-interactive never reads stdin and fails without root/passwordless su
   assert.equal(result.status, 1, output);
   assert.match(output, /root or passwordless sudo/i);
   assert.doesNotMatch(output, /unexpectedly-called|SHOULD_NOT_REACH/);
+});
+
+test("macOS and Windows install prompts use the official Node.js archive", async () => {
+  const cases = [
+    { uname: "Darwin", arch: "arm64", asset: /darwin-arm64\.tar\.gz/ },
+    { uname: "MINGW64_NT-10.0", arch: "x86_64", asset: /win-x64\.zip/ }
+  ];
+  for (const item of cases) {
+    const fakePath = await makeFakePath({
+      curl: "#!/bin/bash\necho curl-should-not-run >&2\nexit 99\n"
+    });
+    const result = runBash(["-c", `source "${DEPLOY_SH}"; install_node_22 deploy`], {
+      env: {
+        PATH: `${fakePath}:/bin:/usr/bin`,
+        HOME: os.tmpdir(),
+        DATAFOUNDRY_UNAME_S: item.uname,
+        DATAFOUNDRY_UNAME_M: item.arch
+      },
+      input: "n\n"
+    });
+    const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+    assert.notEqual(result.status, 0, output);
+    assert.match(output, /nodejs\.org\/dist\/latest-v22\.x/);
+    assert.match(output, item.asset);
+    assert.match(output, /re-run \.\/deploy\.sh/);
+    assert.doesNotMatch(output, /apt-get install|curl-should-not-run/);
+  }
+});
+
+test("macOS non-interactive install does not require sudo", async () => {
+  const fakePath = await makeFakePath({
+    curl: "#!/usr/bin/env bash\necho curl-invoked >&2; exit 99\n",
+    sudo: "#!/usr/bin/env bash\necho sudo-should-not-run >&2; exit 1\n"
+  });
+  const result = runBash(
+    ["-c", `source "${DEPLOY_SH}"; install_node_22 deploy --non-interactive; echo SHOULD_NOT_REACH`],
+    {
+      env: {
+        PATH: `${fakePath}:/bin:/usr/bin`,
+        HOME: os.tmpdir(),
+        DATAFOUNDRY_UNAME_S: "Darwin",
+        DATAFOUNDRY_UNAME_M: "arm64"
+      },
+      input: "y\n"
+    }
+  );
+  const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+  assert.notEqual(result.status, 0, output);
+  assert.match(output, /curl-invoked/);
+  assert.doesNotMatch(output, /sudo-should-not-run|passwordless sudo|SHOULD_NOT_REACH/);
 });
 
 test("installer accepts only node", () => {
@@ -157,7 +247,7 @@ test("no code path executes curl | bash", async () => {
   for (const source of sources) {
     assert.doesNotMatch(source, /curl[^\n]*\|\s*(bash|sh)/);
   }
-  // Node bootstrap and dependency installer download to a temp file first.
+  // Downloads go to a temp file before they are executed or extracted.
   assert.match(await readFile(bootstrap, "utf8"), /mktemp/);
-  assert.match(await readFile(INSTALL_SH, "utf8"), /mktemp/);
+  assert.match(await readFile(INSTALL_SH, "utf8"), /perform_node_install/);
 });

@@ -170,7 +170,7 @@ export class LocalDataGateway implements DataGateway {
   async previewTable(input: PreviewTableInput): Promise<TableResult> {
     throwIfAborted(input.signal);
     const dataSource = this.metadataStore.dataSources.get(input);
-    const adapter = this.createAdapter(dataSource);
+    const adapter = this.createAdapter(dataSource, input.workspace_id);
     const resourcePolicy = dataSourcePolicy(dataSource);
     assertTableAllowed(input.table, resourcePolicy);
     if (resourcePolicy.allowSample === false) {
@@ -214,16 +214,21 @@ export class LocalDataGateway implements DataGateway {
 
     const resourcePolicy = dataSourcePolicy(dataSource);
     assertSqlTablesAllowed(guard.normalized_sql, resourcePolicy);
-    const limit = Math.min(
-      input.limit ?? this.policy.defaultLimit,
-      this.policy.maxLimit,
-      resourcePolicy.maxRows ?? this.policy.maxLimit
-    );
-    const timeoutMs = Math.min(
-      input.timeout_ms ?? this.policy.timeoutMs,
-      this.policy.timeoutMs,
-      resourcePolicy.timeoutMs ?? this.policy.timeoutMs
-    );
+    const wikiScan = input.purpose === "wiki-scan";
+    const limit = wikiScan
+      ? Math.min(input.limit ?? 5_000_000, 5_000_000)
+      : Math.min(
+        input.limit ?? this.policy.defaultLimit,
+        this.policy.maxLimit,
+        resourcePolicy.maxRows ?? this.policy.maxLimit
+      );
+    const timeoutMs = wikiScan
+      ? Math.min(input.timeout_ms ?? 120_000, 300_000)
+      : Math.min(
+        input.timeout_ms ?? this.policy.timeoutMs,
+        this.policy.timeoutMs,
+        resourcePolicy.timeoutMs ?? this.policy.timeoutMs
+      );
 
     try {
       const workspaceId = input.workspace_id ?? this.policy.workspaceId ?? "default";

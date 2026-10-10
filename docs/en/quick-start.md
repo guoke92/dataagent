@@ -4,27 +4,31 @@ This guide is for first-time DataFoundry deployers. Formal mode has two paths; *
 
 | Path | Hosts | Entry |
 | --- | --- | --- |
-| **Recommended: one-click** | Ubuntu / Debian | `./deploy.sh` (config, dependencies, build including TUI, detached Web/API start, and health checks in one flow) |
-| **Manual npm** | Windows, macOS, other Linux, or hand-edited env files | `npm install` → configure `.env` → `npm run build` / `build:web` → `npm run start` |
+| **Recommended: one-click** | Linux, macOS, Windows | `./deploy.sh` (on Windows, `deploy.cmd` also works; config, dependencies, build including TUI, detached Web/API start, and health checks in one flow) |
+| **Manual npm** | Hand-edited env files or split processes | `npm install` → configure `.env` → `npm run build` / `build:web` → `npm run start` |
 
 After deploy, configure a model in the Web UI and run an analysis against the built-in DTC Growth Review data source. Docker / Compose is **not** shipped in this release.
 
 ## Requirements
 
-- **One-click deploy**: Ubuntu or Debian (x86_64 / aarch64); Node.js 22 (the script can help install it after consent)
-- **Manual npm**: Linux, macOS, or Windows; Node.js >= 22 and npm
+- **One-click deploy**: Linux, macOS, or Windows (x86_64 / arm64); Node.js 22 (the script can help install it after consent). On native Windows use `deploy.cmd`; Git Bash can run `./deploy.sh`
+- **Manual npm**: the same hosts; Node.js >= 22 and npm
 - Optional external [DataLink](guides/datalink.md): run it as a separate process if you want semantic graph features (not required for deploy)
 
 Install and run the project in the same environment. On Windows, do not share `node_modules` between Windows and WSL.
 
-## Recommended: Ubuntu / Debian one-click deploy
+## Recommended: one-click deploy
 
-`./deploy.sh` does **not** support native Windows / macOS (use manual npm below).
+Linux, macOS, and Windows Git Bash use `./deploy.sh`. Windows Command Prompt or PowerShell uses `deploy.cmd` (it delegates to `deploy.sh` when Git Bash is installed, otherwise `deploy.ps1`).
 
 ```bash
 git clone https://github.com/datagallery-lab/datafoundry.git
 cd datafoundry
 ./deploy.sh
+```
+
+```bat
+deploy.cmd
 ```
 
 On success Web + API keep running in the background (detached process group). Closing the terminal or pressing `Ctrl+C` in `./deploy.sh logs` does **not** stop DataFoundry — use `./deploy.sh stop`. One-click deploy also builds the TUI, but the TUI does **not** stay running with the stack; start it in another terminal when needed (see “Start the TUI” below).
@@ -79,9 +83,9 @@ To use semantic features, run [DataLink](guides/datalink.md) as a separate servi
 
 Use a name/id containing `datalink` so the DataLink panel can recognize it.
 
-## Windows / macOS / other: manual npm deploy
+## Manual npm deploy
 
-`./deploy.sh` targets **Ubuntu / Debian only** and does not support native Windows / macOS. On Windows, macOS, or other distros, install, configure, and start with npm as below. Use the same path for hand-edited env files or split processes. Do **not** run `npm run dev` in formal environments. Contributor hot-reload is in the appendix.
+Use npm directly when you want to edit environment files by hand or run processes separately. Do **not** run `npm run dev` in formal environments. Contributor hot-reload is in the appendix.
 
 Formal environments:
 

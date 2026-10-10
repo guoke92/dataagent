@@ -153,6 +153,30 @@ test("verifySelectedPorts retries briefly for transient TIME_WAIT occupancy", as
   assert.equal(attempts, 3);
 });
 
+test("describePortOwner reads lsof listeners", async () => {
+  const owner = await describePortOwner(3000, {
+    platform: "darwin",
+    runLsof: async () =>
+      [
+        "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME",
+        "node 42 me 23u IPv4 0t0 TCP *:3000 (LISTEN)"
+      ].join("\n")
+  });
+  assert.equal(owner, "node pid=42");
+});
+
+test("describePortOwner reads Windows netstat listeners", async () => {
+  const owner = await describePortOwner(8787, {
+    platform: "win32",
+    runNetstat: async () =>
+      [
+        "  TCP    0.0.0.0:87870    0.0.0.0:0    LISTENING    9",
+        "  TCP    0.0.0.0:8787     0.0.0.0:0    LISTENING    42"
+      ].join("\n")
+  });
+  assert.equal(owner, "pid=42");
+});
+
 test("describePortOwner matches exact port and not :30001 for :3000", async () => {
   const owner = await describePortOwner(3000, {
     runSs: async () =>

@@ -18,29 +18,82 @@ function lineOwnsPort(line, port) {
   return pattern.test(line);
 }
 
-export async function describePortOwner(port, options = {}) {
-  if (process.platform !== "linux" && !options.runSs) return "unknown process";
+function parseSsOwner(stdout, port) {
+  for (const line of String(stdout ?? "").split(/\r?\n/u)) {
+    if (!/\bLISTEN\b/u.test(line) || !lineOwnsPort(line, port)) continue;
+    const users = /users:\(\("([^"]+)",pid=(\d+)/u.exec(line);
+    if (users) return `${users[1]} pid=${users[2]}`;
+    return "unknown process";
+  }
+  return "unknown process";
+}
+
+async function describeDarwinPortOwner(port, options = {}) {
   try {
-    const runSs =
-      options.runSs ??
+    const runLsof =
+      options.runLsof ??
       (async () => {
-        const { stdout } = await execFileAsync("ss", ["-ltnp"], {
+        const { stdout } = await execFileAsync("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN"], {
           encoding: "utf8",
           maxBuffer: 2 * 1024 * 1024
         });
         return stdout;
       });
-    const stdout = await runSs();
+    const stdout = await runLsof();
+    const lines = String(stdout ?? "")
+      .split(/\r?\n/u)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .slice(1);
+    const line = lines.find((entry) => lineOwnsPort(entry, port)) ?? lines[0];
+    if (!line) return "unknown process";
+    const [command, pid] = line.split(/\s+/u);
+    if (command && /^\d+$/u.test(pid ?? "")) return `${command} pid=${pid}`;
+  } catch {
+    // best effort
+  }
+  return "unknown process";
+}
+
+async function describeWindowsPortOwner(port, options = {}) {
+  try {
+    const runNetstat =
+      options.runNetstat ??
+      (async () => {
+        const { stdout } = await execFileAsync("netstat", ["-ano"], {
+          encoding: "utf8",
+          maxBuffer: 2 * 1024 * 1024,
+          windowsHide: true
+        });
+        return stdout;
+      });
+    const stdout = await runNetstat();
     for (const line of String(stdout ?? "").split(/\r?\n/u)) {
-      if (!/\bLISTEN\b/u.test(line) || !lineOwnsPort(line, port)) continue;
-      const users = /users:\(\("([^"]+)",pid=(\d+)/u.exec(line);
-      if (users) return `${users[1]} pid=${users[2]}`;
-      return "unknown process";
+      if (!/\bLISTENING\b/iu.test(line) || !lineOwnsPort(line, port)) continue;
+      const pid = line.trim().split(/\s+/u).at(-1);
+      if (pid && /^\d+$/u.test(pid) && pid !== "0") return `pid=${pid}`;
     }
   } catch {
     // best effort
   }
   return "unknown process";
+}
+
+export async function describePortOwner(port, options = {}) {
+  if (options.runSs) return parseSsOwner(await options.runSs(), port);
+  const platform = options.platform ?? process.platform;
+  if (platform === "darwin") return describeDarwinPortOwner(port, options);
+  if (platform === "win32") return describeWindowsPortOwner(port, options);
+  if (platform !== "linux") return "unknown process";
+  try {
+    const { stdout } = await execFileAsync("ss", ["-ltnp"], {
+      encoding: "utf8",
+      maxBuffer: 2 * 1024 * 1024
+    });
+    return parseSsOwner(stdout, port);
+  } catch {
+    return "unknown process";
+  }
 }
 export async function probePort(host, port, options = {}) {
   const describe = options.describeOwner ?? describePortOwner;

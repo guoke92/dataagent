@@ -115,6 +115,7 @@ export type DatasourceDto = {
   revision?: number;
   createdAt?: string;
   updatedAt?: string;
+  scanJob?: JobDto;
 };
 
 export type DatasourceTypeParamDto = {
@@ -648,9 +649,10 @@ export type JobDto = {
   resource_id: string;
   resourceId?: string;
   artifactId?: string;
-  status: "pending" | "running" | "completed" | "failed" | "canceled";
+  status: "pending" | "queued" | "running" | "completed" | "failed" | "canceled";
   progress: number;
   result?: Record<string, unknown>;
+  error?: { message?: string };
   created_at?: string;
   started_at?: string;
   finished_at?: string;

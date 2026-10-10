@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bootstrap.sh
+source "${ROOT_DIR}/bootstrap.sh"
+
 ACTION="${1:-}"
 NON_INTERACTIVE=0
 if [[ "${2:-}" == "--non-interactive" ]] || [[ "${DEPLOY_NON_INTERACTIVE:-}" == "1" ]]; then
@@ -17,30 +21,12 @@ case "${ACTION}" in
   *) usage ;;
 esac
 
-run_privileged() {
-  if [[ "$(id -u)" -eq 0 ]]; then
-    "$@"
-  elif [[ "${NON_INTERACTIVE}" -eq 1 ]]; then
-    sudo -n "$@"
-  else
-    sudo "$@"
-  fi
-}
+check_supported_system
 
-install_node() {
-  local setup
-  local nodesource_url="https://deb.nodesource.com/setup_22.x"
-  setup="$(mktemp)"
-  trap 'rm -f "${setup}"' RETURN
-  curl -fsSL "${nodesource_url}" -o "${setup}"
-  run_privileged bash "${setup}"
-  run_privileged apt-get install -y nodejs
-  rm -f "${setup}"
-  trap - RETURN
-  node --version >/dev/null
-  npm --version >/dev/null
-}
-
-case "${ACTION}" in
-  node) install_node ;;
-esac
+if [[ "${NON_INTERACTIVE}" -eq 1 ]]; then
+  perform_node_install --non-interactive
+else
+  perform_node_install
+fi
+activate_node_prefix || true
+verify_node_22

@@ -1,7 +1,8 @@
 import { DatabaseSync } from "node:sqlite";
 
-import type { ClaimDomain, GroundRecord, PageStatus, SourceKind, WikiField, WikiPage } from "./types.js";
-import { buildValueIndex, type ValueIndex } from "./value-index.js";
+import { normalizeValue } from "./text.js";
+import type { ClaimDomain, GroundRecord, LookupHit, PageStatus, SourceKind, WikiField, WikiPage } from "./types.js";
+import type { IndexedValue } from "./value-index.js";
 
 export type GroundFile = {
   source_kind: SourceKind;
@@ -72,8 +73,8 @@ export const ensureWikiSchema = (db: DatabaseSync): void => {
     );
     CREATE INDEX IF NOT EXISTS idx_wiki_values_exact
       ON wiki_values (workspace_id, source_id, normalized);
-    CREATE INDEX IF NOT EXISTS idx_wiki_values_shingle
-      ON wiki_values (workspace_id, source_id, shingle);
+    CREATE INDEX IF NOT EXISTS idx_wiki_values_column
+      ON wiki_values (workspace_id, source_id, table_name, column_name);
   `);
   const pageColumns = db.prepare("PRAGMA table_info(wiki_pages)").all() as Array<{ name: string }>;
   if (!pageColumns.some((column) => column.name === "fields_json")) {
@@ -170,7 +171,7 @@ export class WikiStore {
         scan_status = 'facts',
         facts_at = excluded.facts_at
     `).run(this.workspaceId, kind, sourceId, fingerprint, now);
-    if (isValueIndex(extras.valueIndex)) this.writeValueIndex(sourceId, extras.valueIndex);
+    if (Array.isArray(extras.exactValues)) this.writeExactValues(sourceId, extras.exactValues as IndexedValue[]);
   }
 
   readExtras(kind: SourceKind, sourceId: string): Record<string, unknown> {
@@ -179,17 +180,39 @@ export class WikiStore {
     ).get(this.workspaceId, kind, sourceId) as { payload: string } | undefined;
     const payload = raw ? JSON.parse(raw.payload) as Record<string, unknown> : {};
     const dialect = typeof payload.dialect === "string" ? payload.dialect : undefined;
-    const exact = this.db.prepare(
-      "SELECT table_name, column_name, value FROM wiki_values WHERE workspace_id = ? AND source_id = ? AND shingle = ''"
-    ).all(this.workspaceId, sourceId) as Array<{ table_name: string; column_name: string; value: string }>;
-    return {
-      ...(dialect ? { dialect } : {}),
-      valueIndex: buildValueIndex(exact.map((row) => ({
+    return dialect ? { dialect } : {};
+  }
+
+  lookupValues(sourceId: string, literal: string): LookupHit[] {
+    const normalized = normalizeValue(literal);
+    if (normalized.length === 0) return [];
+    const exact = this.db.prepare(`
+      SELECT table_name, column_name, value
+      FROM wiki_values
+      WHERE workspace_id = ? AND source_id = ? AND shingle = '' AND normalized = ?
+      LIMIT 32
+    `).all(this.workspaceId, sourceId, normalized) as Array<{ table_name: string; column_name: string; value: string }>;
+    if (exact.length > 0) {
+      return uniqueHits(exact.map((row) => ({
         table: row.table_name,
         column: row.column_name,
-        value: row.value
-      })))
-    };
+        match: "exact" as const,
+        sample: row.value
+      })));
+    }
+    const needle = `%${escapeLike(normalized)}%`;
+    const fuzzy = this.db.prepare(`
+      SELECT table_name, column_name, value
+      FROM wiki_values
+      WHERE workspace_id = ? AND source_id = ? AND shingle = '' AND normalized LIKE ? ESCAPE '\\'
+      LIMIT 32
+    `).all(this.workspaceId, sourceId, needle) as Array<{ table_name: string; column_name: string; value: string }>;
+    return uniqueHits(fuzzy.map((row) => ({
+      table: row.table_name,
+      column: row.column_name,
+      match: "lsh" as const,
+      sample: row.value
+    }))).slice(0, 8);
   }
 
   listGrounds(): GroundFile[] {
@@ -211,6 +234,10 @@ export class WikiStore {
       .run(this.workspaceId, kind, sourceId);
     this.db.prepare("DELETE FROM wiki_sources WHERE workspace_id = ? AND kind = ? AND external_id = ?")
       .run(this.workspaceId, kind, sourceId);
+    if (kind === "database") {
+      this.db.prepare("DELETE FROM wiki_values WHERE workspace_id = ? AND source_id = ?")
+        .run(this.workspaceId, sourceId);
+    }
   }
 
   markSemantic(kind: SourceKind, sourceId: string): void {
@@ -379,28 +406,46 @@ export class WikiStore {
       .run(this.workspaceId, pageId);
   }
 
-  private writeValueIndex(sourceId: string, index: ValueIndex): void {
+  deleteExactValues(sourceId: string, table: string, column: string): void {
+    this.db.prepare(
+      "DELETE FROM wiki_values WHERE workspace_id = ? AND source_id = ? AND table_name = ? AND column_name = ?"
+    ).run(this.workspaceId, sourceId, table, column);
+  }
+
+  private writeExactValues(sourceId: string, entries: IndexedValue[]): void {
     this.db.prepare("DELETE FROM wiki_values WHERE workspace_id = ? AND source_id = ?")
       .run(this.workspaceId, sourceId);
     const insert = this.db.prepare(`
       INSERT INTO wiki_values (workspace_id, source_id, table_name, column_name, value, normalized, shingle)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, '')
     `);
-    for (const entry of index.exact) {
-      insert.run(this.workspaceId, sourceId, entry.table, entry.column, entry.value, entry.value.trim().toLowerCase(), "");
-    }
-    for (const [shingle, buckets] of Object.entries(index.buckets)) {
-      for (const bucket of buckets) {
-        insert.run(this.workspaceId, sourceId, bucket.table, bucket.column, bucket.value, bucket.value.trim().toLowerCase(), shingle);
+    this.db.exec("BEGIN");
+    try {
+      let count = 0;
+      for (const entry of entries) {
+        insert.run(this.workspaceId, sourceId, entry.table, entry.column, entry.value, normalizeValue(entry.value));
+        count += 1;
+        if (count % 500 === 0) {
+          this.db.exec("COMMIT");
+          this.db.exec("BEGIN");
+        }
       }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
     }
   }
 }
 
-const isValueIndex = (value: unknown): value is ValueIndex => {
-  if (!value || typeof value !== "object") return false;
-  const index = value as ValueIndex;
-  return Array.isArray(index.exact) && typeof index.buckets === "object";
+const uniqueHits = (hits: LookupHit[]): LookupHit[] => {
+  const seen = new Set<string>();
+  return hits.filter((hit) => {
+    const key = `${hit.table}.${hit.column}.${hit.sample}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 };
 
 const escapeLike = (value: string): string => value.replace(/[\\%_]/gu, (char) => `\\${char}`);

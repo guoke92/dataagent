@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Linux, macOS, and Windows Git Bash entrypoint.
+# Native Windows cmd/PowerShell: deploy.cmd (falls back to deploy.ps1 when Git Bash is absent).
 set -Eeuo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

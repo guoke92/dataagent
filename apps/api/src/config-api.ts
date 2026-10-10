@@ -67,7 +67,7 @@ import {
   modelProfileTestSuccessReason
 } from "./model-profile-test.js";
 import { handleCapabilitiesRequest } from "./routes/capabilities.js";
-import { createLlmClientFromEnv, ingestWikiText, refreshWikiTable, rescanDatabase, scanDatabaseFacts, scheduleDatabaseSemantic } from "./wiki-scan.js";
+import { createLlmClientForWorkspace, enqueueWikiScan, ingestWikiText, WIKI_SCAN_JOB_TYPE } from "./wiki-scan.js";
 import type { ConfigApiContext, ConfigApiResponse, WorkspaceConfigContext } from "./routes/types.js";
 import {
   connectPolicyMcpClient,
@@ -164,12 +164,20 @@ export const handleConfigApiRequest = async (
   }
 };
 
+const decodePathSegment = (value: string): string => {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+};
+
 const routeConfigRequest = async (
   request: IncomingMessage,
   pathname: string,
   context: WorkspaceConfigContext
 ): Promise<ConfigApiResponse> => {
-  const segments = pathname.slice("/api/v1/".length).split("/").filter(Boolean);
+  const segments = pathname.slice("/api/v1/".length).split("/").filter(Boolean).map(decodePathSegment);
   const root = segments[0] ?? "";
 
   if (root === "me") {
@@ -248,17 +256,30 @@ const handleWikiRequest = async (
   if (segments[0] === "datasources" && segments[2] === "scan" && request.method === "POST") {
     const datasourceId = decodeURIComponent(segments[1] ?? "");
     if (!datasourceId) return fail(400, "BAD_REQUEST", "datasource id is required.");
-    await rescanDatabase({
+    const job = enqueueWikiScan({
+      runner: context.wikiScanRunner,
+      metadataStore: context.metadataStore,
       wiki,
       gateway: context.dataGateway,
       userId: context.userId,
       workspaceId: context.workspaceId,
       datasourceId
     });
-    return ok(wiki.projectSchema(context.workspaceId, datasourceId) ?? { tables: [] });
+    return ok(wikiScanJobDto(job), 202);
+  }
+  if (segments[0] === "scans" && request.method === "GET") {
+    const datasourceId = decodeURIComponent(segments[1] ?? "");
+    if (!datasourceId) return fail(400, "BAD_REQUEST", "datasource id is required.");
+    const job = context.metadataStore.configJobs.latest({
+      workspace_id: context.workspaceId,
+      user_id: context.userId,
+      type: WIKI_SCAN_JOB_TYPE,
+      resource_id: datasourceId
+    });
+    return ok({ job: job ? wikiScanJobDto(job) : null });
   }
   if (segments[0] === "lint" && request.method === "GET") {
-    return ok({ findings: await wiki.lint(context.workspaceId, createLlmClientFromEnv()) });
+    return ok({ findings: await wiki.lint(context.workspaceId, createLlmClientForWorkspace(context.metadataStore, context.userId, context.workspaceId).llm) });
   }
   if (segments[0] === "pages" && segments.length === 1 && request.method === "GET") {
     return ok({
@@ -292,7 +313,9 @@ const handleWikiRequest = async (
       const datasourceId = page?.source_ids[0];
       if (!page || page.type !== "table" || !datasourceId) return fail(404, "RESOURCE_NOT_FOUND", "Wiki table not found.");
       const column = typeof body.column === "string" && body.column.length > 0 ? body.column : undefined;
-      await refreshWikiTable({
+      const job = enqueueWikiScan({
+        runner: context.wikiScanRunner,
+        metadataStore: context.metadataStore,
         wiki,
         gateway: context.dataGateway,
         userId: context.userId,
@@ -301,7 +324,7 @@ const handleWikiRequest = async (
         tableName: page.title,
         ...(column ? { columnName: column } : {})
       });
-      return ok(wiki.catalogPage(context.workspaceId, pageId) ?? { id: pageId });
+      return ok(wikiScanJobDto(job), 202);
     }
     if (action === "pin" && request.method === "POST") {
       const body = await readJsonBody(request);
@@ -770,64 +793,46 @@ const handleDatasourceRequest = async (
     }
   }
   if (action === "introspect" && request.method === "POST") {
-    const job = context.metadataStore.configJobs.create({
-      workspace_id: context.workspaceId,
-      user_id: context.userId,
-      type: "datasource-introspect",
-      resource_id: id,
-      ...(request.headers["idempotency-key"]
-        ? { idempotency_key: String(request.headers["idempotency-key"]) }
-        : {})
+    const job = enqueueWikiScan({
+      runner: context.wikiScanRunner,
+      metadataStore: context.metadataStore,
+      wiki: context.llmWiki,
+      gateway: context.dataGateway,
+      userId: context.userId,
+      workspaceId: context.workspaceId,
+      datasourceId: id
     });
-    if (job.status !== "queued") {
-      return ok(job, 202);
-    }
-    context.metadataStore.configJobs.update({
-      id: job.id,
-      workspace_id: context.workspaceId,
+    return ok(wikiScanJobDto(job), 202);
+  }
+  if (action === "tables" && segments[3] === "preview" && request.method === "GET") {
+    const table = segments[2] ?? "";
+    if (!table) return fail(400, "BAD_REQUEST", "table name is required.");
+    const requestUrl = new URL(request.url ?? "/", "http://127.0.0.1");
+    const requestedLimit = Number(requestUrl.searchParams.get("limit"));
+    const limit = Number.isFinite(requestedLimit) ? Math.min(Math.max(Math.floor(requestedLimit), 1), 200) : 50;
+    const result = await context.dataGateway.previewTable({
       user_id: context.userId,
-      status: "running",
-      progress: 10
+      workspace_id: context.workspaceId,
+      datasource_id: id,
+      table,
+      limit: limit + 1
     });
-    try {
-      await rescanDatabase({
-        wiki: context.llmWiki,
-        gateway: context.dataGateway,
-        userId: context.userId,
-        workspaceId: context.workspaceId,
-        datasourceId: id
-      });
-      const snapshot = wikiSchemaPayload(context.llmWiki.projectSchema(context.workspaceId, id), id);
-      const completed = context.metadataStore.configJobs.update({
-        id: job.id,
-        workspace_id: context.workspaceId,
-        user_id: context.userId,
-        status: "completed",
-        progress: 100,
-        result: recordValue(snapshot.schema) ?? snapshot
-      });
-      return ok(completed, 202);
-    } catch (error) {
-      context.metadataStore.configJobs.update({
-        id: job.id,
-        workspace_id: context.workspaceId,
-        user_id: context.userId,
-        status: "failed",
-        error: { message: messageOf(error) }
-      });
-      throw error;
-    }
+    const visible = result.rows.slice(0, limit);
+    return ok({
+      columns: result.columns.map((name) => ({ name })),
+      rows: visible.map((row) => Object.fromEntries(result.columns.map((name, index) => [name, jsonSafeCell(row[index])]))),
+      total: visible.length,
+      hasMore: result.rows.length > limit
+    });
   }
   if (action === "schema" && request.method === "GET") {
     const requestUrl = new URL(request.url ?? "/", "http://127.0.0.1");
-    const options = {
+    const refresh = requestUrl.searchParams.get("refresh") === "true";
+    const snapshot = await resolveDatasourceSchemaSnapshot(id, context, refresh);
+    return ok(schemaBrowserDto(snapshot.payload, {
       includeStats: requestUrl.searchParams.get("includeStats") === "true",
       query: requestUrl.searchParams.get("q") ?? undefined
-    };
-    return ok(schemaBrowserDto(
-      wikiSchemaPayload(context.llmWiki.projectSchema(context.workspaceId, id), id),
-      options
-    ));
+    }));
   }
   if (request.method === "GET") {
     return ok(dataSourceDto(context.metadataStore.dataSources.get({ user_id: context.userId, datasource_id: id })));
@@ -844,6 +849,7 @@ const handleDatasourceRequest = async (
         user_id: context.userId
       });
     }
+    context.llmWiki.forgetDatasource(context.workspaceId, id);
     context.metadataStore.dataSources.delete({ user_id: context.userId, datasource_id: id });
     return ok({ deleted: true, id });
   }
@@ -1103,51 +1109,78 @@ const saveDatasource = async (
     context.metadataStore,
     () => saveDatasourceInTransaction(body, id, context)
   );
-  const wiki = context.llmWiki;
-  await scanDatabaseFacts({
-    wiki,
+  const scanJob = enqueueWikiScan({
+    runner: context.wikiScanRunner,
+    metadataStore: context.metadataStore,
+    wiki: context.llmWiki,
     gateway: context.dataGateway,
     userId: context.userId,
     workspaceId: context.workspaceId,
     datasourceId: id
   });
-  scheduleDatabaseSemantic({
-    wiki,
-    workspaceId: context.workspaceId,
-    datasourceId: id
-  });
-  return saved;
+  return { ...saved, scanJob: wikiScanJobDto(scanJob) };
 };
 
-const wikiSchemaPayload = (
-  projection: ReturnType<WorkspaceConfigContext["llmWiki"]["projectSchema"]>,
-  datasourceId: string
-): Record<string, unknown> => {
-  if (!projection) {
-    return { schema: { datasource_id: datasourceId, tables: [], relations: [] }, scanStatus: "missing" };
+const resolveDatasourceSchemaSnapshot = async (
+  datasourceId: string,
+  context: WorkspaceConfigContext,
+  refresh: boolean
+): Promise<ConfigResourceRecord> => {
+  const snapshot = context.metadataStore.configResources.find({
+    id: datasourceId,
+    workspace_id: context.workspaceId,
+    user_id: context.userId,
+    kind: "datasource-schema"
+  });
+  if (refresh || !snapshot || isDatasourceSchemaExpired(datasourceId, snapshot, context)) {
+    return refreshDatasourceSchemaSnapshot(datasourceId, context);
   }
-  return {
-    schema: {
-      datasource_id: projection.datasource_id,
-      ...(projection.dialect ? { dialect: projection.dialect } : {}),
-      tables: projection.tables.map((table) => ({
-        name: table.name,
-        columns: table.columns.map((column) => ({
-          name: column.name,
-          type: column.type,
-          ...(column.nullable !== undefined ? { nullable: column.nullable } : {}),
-          ...(column.label ? { description: column.label } : {}),
-          ...(column.examples ? { examples: column.examples } : {}),
-          ...(column.labels ? { labels: column.labels } : {}),
-          ...(column.range ? { range: column.range } : {})
-        }))
-      })),
-      relations: projection.relations
-    },
-    inspectedAt: projection.revision,
-    revision: projection.revision,
-    scanStatus: "ready"
-  };
+  return snapshot;
+};
+
+const refreshDatasourceSchemaSnapshot = async (
+  datasourceId: string,
+  context: WorkspaceConfigContext
+): Promise<ConfigResourceRecord> => {
+  const schema = await context.dataGateway.inspectSchema({
+    user_id: context.userId,
+    workspace_id: context.workspaceId,
+    datasource_id: datasourceId
+  });
+  return context.metadataStore.configResources.upsert({
+    id: datasourceId,
+    workspace_id: context.workspaceId,
+    user_id: context.userId,
+    kind: "datasource-schema",
+    name: datasourceId,
+    payload: { schema, adapterSchemaVersion: 1, inspectedAt: new Date().toISOString() },
+    status: "ready"
+  });
+};
+
+const isDatasourceSchemaExpired = (
+  datasourceId: string,
+  snapshot: ConfigResourceRecord,
+  context: WorkspaceConfigContext
+): boolean => {
+  const refreshIntervalSec = datasourceRefreshIntervalSec(datasourceId, context);
+  if (refreshIntervalSec === undefined) return false;
+  const inspectedAt = stringValue(snapshot.payload.inspectedAt);
+  if (!inspectedAt) return true;
+  const inspectedTime = Date.parse(inspectedAt);
+  if (!Number.isFinite(inspectedTime)) return true;
+  return Date.now() - inspectedTime >= refreshIntervalSec * 1000;
+};
+
+const datasourceRefreshIntervalSec = (
+  datasourceId: string,
+  context: WorkspaceConfigContext
+): number | undefined => {
+  const datasource = context.metadataStore.dataSources.get({ user_id: context.userId, datasource_id: datasourceId });
+  const config = parseRecord(datasource.config_json);
+  const introspection = recordValue(config.introspection);
+  const refreshIntervalSec = numberValue(introspection?.refreshIntervalSec);
+  return refreshIntervalSec !== undefined && refreshIntervalSec > 0 ? Math.floor(refreshIntervalSec) : undefined;
 };
 
 const schemaBrowserDto = (
@@ -1186,7 +1219,7 @@ const schemaBrowserTableDto = (value: unknown, includeStats: boolean): Record<st
   return {
     name: stringValue(table.name) ?? "",
     table: stringValue(table.name) ?? "",
-    description: stringValue(table.description) ?? "",
+    description: stringValue(table.description) || stringValue(table.comment) || "",
     sampleAvailable: true,
     columns: columns.map(schemaBrowserColumnDto),
     ...(includeStats ? { stats: schemaStatsDto(table) } : {})
@@ -1198,12 +1231,9 @@ const schemaBrowserColumnDto = (value: unknown): Record<string, unknown> => {
   const dto: Record<string, unknown> = {
     name: stringValue(column.name) ?? "",
     type: stringValue(column.type) ?? "unknown",
-    description: stringValue(column.description) ?? ""
+    description: stringValue(column.description) || stringValue(column.comment) || ""
   };
   if (column.nullable !== undefined) dto.nullable = Boolean(column.nullable);
-  if (Array.isArray(column.labels)) dto.labels = column.labels;
-  if (Array.isArray(column.examples)) dto.examples = column.examples;
-  if (typeof column.range === "string" && column.range.length > 0) dto.range = column.range;
   return dto;
 };
 
@@ -1349,6 +1379,8 @@ const handleGenericResourceRequest = async (
         await ingestWikiText({
           wiki,
           workspaceId: context.workspaceId,
+          userId: context.userId,
+          metadataStore: context.metadataStore,
           sourceId: document.id,
           filename: resolved.ref.filename,
           content,
@@ -1415,6 +1447,8 @@ const handleGenericResourceRequest = async (
       await ingestWikiText({
         wiki: context.llmWiki,
         workspaceId: context.workspaceId,
+        userId: context.userId,
+        metadataStore: context.metadataStore,
         sourceId: document.id,
         filename: document.filename,
         content: raw.text,
@@ -1457,6 +1491,8 @@ const handleGenericResourceRequest = async (
     await ingestWikiText({
       wiki,
       workspaceId: context.workspaceId,
+      userId: context.userId,
+      metadataStore: context.metadataStore,
       sourceId: document.id,
       filename,
       content,
@@ -1492,7 +1528,7 @@ const handleGenericResourceRequest = async (
     const datasourceIds = [...new Set(documents.flatMap((document) =>
       context.llmWiki.sourceText(context.workspaceId, document.id)?.datasourceIds ?? []
     ))];
-    const hits = await context.llmWiki.recall(context.workspaceId, query, datasourceIds);
+    const hits = context.llmWiki.query(context.workspaceId, query, datasourceIds);
     const limited = topK !== undefined ? hits.slice(0, topK) : hits;
     return ok({
       results: limited.map((hit, index) => ({
@@ -1540,6 +1576,8 @@ const handleGenericResourceRequest = async (
         await ingestWikiText({
           wiki: context.llmWiki,
           workspaceId: context.workspaceId,
+          userId: context.userId,
+          metadataStore: context.metadataStore,
           sourceId: document.id,
           filename: document.filename,
           content: raw.text,
@@ -1893,7 +1931,19 @@ const handleJobRequest = (
 ): ConfigApiResponse => {
   const id = segments[0];
   if (!id) {
-    return fail(400, "BAD_REQUEST", "Job id is required.");
+    const url = new URL(request.url ?? "/", "http://localhost");
+    const resourceId = url.searchParams.get("resourceId") ?? url.searchParams.get("resource_id");
+    const type = url.searchParams.get("type") ?? WIKI_SCAN_JOB_TYPE;
+    if (!resourceId) {
+      return fail(400, "BAD_REQUEST", "Job id is required.");
+    }
+    const job = context.metadataStore.configJobs.latest({
+      workspace_id: context.workspaceId,
+      user_id: context.userId,
+      type,
+      resource_id: resourceId
+    });
+    return ok(job ? wikiScanJobDto(job) : { job: null });
   }
   if (request.method === "GET") {
     return ok(artifactExportJobDto(context.metadataStore.configJobs.get({
@@ -2610,17 +2660,22 @@ const queryHistoryDto = (record: QueryHistoryRecord): Record<string, unknown> =>
   updatedAt: record.updated_at
 });
 
-const artifactExportJobDto = (job: JobRecord): Record<string, unknown> => ({
+const artifactExportJobDto = (job: JobRecord): Record<string, unknown> => wikiScanJobDto(job);
+
+const wikiScanJobDto = (job: JobRecord): Record<string, unknown> => ({
   id: job.id,
   type: job.type,
+  resourceId: job.resource_id,
+  resource_id: job.resource_id,
   artifactId: job.resource_id,
-  status: job.status,
+  status: job.status === "queued" ? "pending" : job.status,
   progress: job.progress,
   ...(job.result !== undefined ? { result: job.result } : {}),
   ...(job.error !== undefined ? { error: job.error } : {}),
   createdAt: job.created_at,
-  ...(job.started_at ? { startedAt: job.started_at } : {}),
-  ...(job.finished_at ? { finishedAt: job.finished_at } : {})
+  created_at: job.created_at,
+  ...(job.started_at ? { startedAt: job.started_at, started_at: job.started_at } : {}),
+  ...(job.finished_at ? { finishedAt: job.finished_at, finished_at: job.finished_at } : {})
 });
 
 const encodeSessionCursor = (session: SessionRecord): string => Buffer.from(JSON.stringify({
@@ -4002,6 +4057,17 @@ const messageOf = (value: unknown): string => value instanceof Error ? value.mes
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
 const recordValue = (value: unknown): Record<string, unknown> | undefined => isRecord(value) ? value : undefined;
 const arrayValue = (value: unknown): unknown[] | undefined => Array.isArray(value) ? value : undefined;
+const jsonSafeCell = (value: unknown): unknown => {
+  if (typeof value === "bigint") return value.toString();
+  if (value instanceof Date) return value.toISOString();
+  if (typeof Buffer !== "undefined" && Buffer.isBuffer(value)) return value.toString("utf8");
+  if (Array.isArray(value)) return value.map((item) => jsonSafeCell(item));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, jsonSafeCell(item)]));
+  }
+  return value;
+};
+
 const stringValue = (value: unknown): string | undefined =>
   typeof value === "string" && value.trim() ? value.trim() : undefined;
 const numberValue = (value: unknown): number | undefined =>

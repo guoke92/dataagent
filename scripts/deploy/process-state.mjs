@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -89,6 +89,10 @@ export async function rotateRuntimeLog(logPath, options = {}) {
   await writeFile(logPath, "", { encoding: "utf8", mode: 0o600 });
 }
 
+function launchIdVerificationEnabled(options = {}) {
+  return Boolean(options.forceLaunchIdCheck) || process.platform === "linux" || process.platform === "darwin";
+}
+
 async function readLaunchIdFromProcAsync(pid) {
   try {
     const environ = await readFile(`/proc/${pid}/environ`);
@@ -99,8 +103,37 @@ async function readLaunchIdFromProcAsync(pid) {
   }
 }
 
+function readDarwinProcessMarker(pid) {
+  return new Promise((resolve) => {
+    execFile(
+      "ps",
+      ["-Eww", "-p", String(pid)],
+      { encoding: "utf8", maxBuffer: 8 * 1024 * 1024, windowsHide: true },
+      (error, stdout) => {
+        if (error) {
+          resolve({ launchId: null, envVisible: false });
+          return;
+        }
+        const text = String(stdout ?? "");
+        const match = /(?:^|\s)DATAFOUNDRY_LAUNCH_ID=([^\s]+)/.exec(text);
+        // Platform binaries such as /bin/bash hide their environment from ps.
+        // A visible PATH/HOME means the marker was readable and is simply absent.
+        const envVisible = /(?:^|\s)(?:PATH|HOME|USER|SHELL)=/.test(text);
+        resolve({ launchId: match?.[1] ?? null, envVisible });
+      }
+    );
+  });
+}
+
+function defaultReadLaunchId(pid) {
+  if (process.platform === "darwin") {
+    return readDarwinProcessMarker(pid).then((marker) => marker.launchId);
+  }
+  return readLaunchIdFromProcAsync(pid);
+}
+
 export async function verifyManagedProcessForStop(pid, expectedLaunchId, options = {}) {
-  if (process.platform !== "linux" && !options.forceLaunchIdCheck) {
+  if (!launchIdVerificationEnabled(options)) {
     return { allowed: true };
   }
 
@@ -108,7 +141,15 @@ export async function verifyManagedProcessForStop(pid, expectedLaunchId, options
     return { allowed: false, reason: "missing-expected-launch-id" };
   }
 
-  const readLaunchId = options.readLaunchId ?? readLaunchIdFromProcAsync;
+  if (process.platform === "darwin" && options.readLaunchId == null) {
+    const marker = await readDarwinProcessMarker(pid);
+    if (marker.launchId === expectedLaunchId) return { allowed: true };
+    if (marker.launchId) return { allowed: false, reason: "launch-id-mismatch" };
+    if (!marker.envVisible) return { allowed: true };
+    return { allowed: false, reason: "launch-id-unverified" };
+  }
+
+  const readLaunchId = options.readLaunchId ?? defaultReadLaunchId;
   const launchId = await readLaunchId(pid);
 
   if (launchId === expectedLaunchId) {
@@ -145,7 +186,7 @@ export async function inspectManagedRuntime(root, options = {}) {
     return { state, running: false, stale: true, reason: "dead-pid" };
   }
 
-  if (process.platform === "linux" || options.forceLaunchIdCheck) {
+  if (launchIdVerificationEnabled(options)) {
     const verification = await verifyManagedProcessForStop(state.pid, state.launchId, options);
     if (!verification.allowed) {
       return {
@@ -198,7 +239,10 @@ export async function startManagedStack(root, options = {}) {
       cwd: root,
       env,
       detached: true,
-      stdio: ["ignore", logFd.fd, logFd.fd]
+      stdio: ["ignore", logFd.fd, logFd.fd],
+      // npm is npm.cmd on Windows and cannot be spawned without a shell.
+      shell: process.platform === "win32",
+      windowsHide: true
     });
   } finally {
     await logFd.close();
@@ -219,6 +263,26 @@ export async function startManagedStack(root, options = {}) {
   return state;
 }
 
+function signalManagedPid(pid, signal) {
+  if (process.platform !== "win32") {
+    try {
+      process.kill(-pid, signal);
+    } catch {
+      process.kill(pid, signal);
+    }
+    return Promise.resolve();
+  }
+
+  const args = ["/PID", String(pid), "/T"];
+  if (signal === "SIGKILL") args.push("/F");
+  return new Promise((resolve, reject) => {
+    execFile("taskkill", args, { windowsHide: true }, (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
 export async function stopManagedStack(root, options = {}) {
   const state = await readDeploymentState(root);
   if (!state?.pid) return { stopped: false, reason: "not-running" };
@@ -227,7 +291,7 @@ export async function stopManagedStack(root, options = {}) {
     return { stopped: false, reason: "stale" };
   }
 
-  if (process.platform === "linux" || options.forceLaunchIdCheck) {
+  if (launchIdVerificationEnabled(options)) {
     const verification = await verifyManagedProcessForStop(state.pid, state.launchId, options);
     if (!verification.allowed) {
       // PID reuse / foreign process: never signal, but clear stale state so start can recover.
@@ -241,9 +305,9 @@ export async function stopManagedStack(root, options = {}) {
   }
 
   try {
-    process.kill(-state.pid, "SIGTERM");
+    await signalManagedPid(state.pid, "SIGTERM");
   } catch {
-    process.kill(state.pid, "SIGTERM");
+    // Windows taskkill without /F often fails for console trees; SIGKILL follows.
   }
 
   const timeoutMs = options.timeoutMs ?? 15_000;
@@ -257,13 +321,9 @@ export async function stopManagedStack(root, options = {}) {
   }
 
   try {
-    process.kill(-state.pid, "SIGKILL");
+    await signalManagedPid(state.pid, "SIGKILL");
   } catch {
-    try {
-      process.kill(state.pid, "SIGKILL");
-    } catch {
-      // process may have exited between checks
-    }
+    // process may have exited between checks
   }
 
   const killTimeoutMs = options.killTimeoutMs ?? 5_000;

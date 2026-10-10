@@ -840,16 +840,15 @@ export const buildAgentInstructions = (input: AgentInstructionsInput): string =>
   }
   if (input.wikiOutline && input.wikiOutline.trim().length > 0) {
     toolGroups.push(
-      "Selected datasource wiki outlines are already compiled. Use them before inspect_schema. "
+      "Selected datasource wiki outlines are already compiled. "
       + "They cover each selected datasource, and bridge pages only when every datasource they bind is selected.\n"
       + input.wikiOutline.trim()
     );
   }
   if (enabled("recall_wiki")) {
     toolGroups.push(
-      "Knowledge recall: recall_wiki. It searches the compiled Wiki only, including logical pages "
-      + "(tables, relations, value domains) and semantic pages (concepts, metrics, query patterns, contradictions). "
-      + "Imported documents are compiled into that Wiki and are not retrieved as raw chunks."
+      "Knowledge recall: recall_wiki. One call returns schema_id, value links, semantic hits, and the logical tables and relations. "
+      + "Pass schema_id to run_sql_readonly."
     );
   }
   const workspaceAssetTools = ["list_workspace_files", "read_workspace_file", "promote_workspace_file"]
@@ -1047,19 +1046,9 @@ export const buildAgentInstructions = (input: AgentInstructionsInput): string =>
         + skillScriptPolicy
     );
   }
-  if (enabled("inspect_schema") && (enabled("run_sql_readonly") || enabled("preview_table"))) {
-    policies.push("The selected datasource wiki outline is already in this prompt. Use it to see which tables and relations exist. "
-      + "Call recall_wiki with the user question before inspect_schema or SQL. "
-      + "inspect_schema only mints a schema_id for the tables recall already identified; pass those table names and do not inspect the whole catalog. "
-      + "inspect_schema returns a schema_id token that authorizes "
-      + "run_sql_readonly and preview_table; pass it as their schema_id argument. The first SQL or preview against a "
-      + "datasource must be preceded by an inspect_schema for it; without a valid schema_id the tools fail with "
-      + "SCHEMA_REQUIRED. The token enforces inspect-before-query ordering within this run; Data Gateway remains the "
-      + "authorization and read-only SQL boundary. Reuse the token instead of repeatedly inspecting the same schema. "
-      + "inspect_schema always reads the compiled Wiki projection; live information_schema access happens only while "
-      + "scanning into Wiki. "
-      + "Use lookup_values only for an open literal that recall did not already label. A hit is evidence, not a confirmed filter. "
-      + "Prefer confirmed relations for cross-table SQL, and do not preview columns that already list labels."
+  if (enabled("recall_wiki") && (enabled("run_sql_readonly") || enabled("preview_table"))) {
+    policies.push("recall_wiki returns schema_id for this run. Pass that schema_id to run_sql_readonly and preview_table. "
+      + "Reuse it. Data Gateway remains the read-only SQL boundary."
     );
   }
   if (enabled("run_sql_readonly")) {

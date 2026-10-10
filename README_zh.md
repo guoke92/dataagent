@@ -73,9 +73,9 @@ DataAgent 0.2 在首个可用版本上，进一步补齐了有状态、可追溯
 
 正式态有两条路径（都不要跑 `npm run dev`）。本版本不提供 Docker / Compose。
 
-### 推荐：Ubuntu / Debian 一键部署
+### 推荐：一键部署（Linux / macOS / Windows）
 
-`./deploy.sh` 自动生成配置、安装依赖、构建（含 Web、API 与 TUI），并以 detached 后台进程启动 Web + API——关闭终端一般不会停止服务。TUI 会在部署时构建就绪，但它是前台交互客户端：请另开终端执行 `./deploy.sh tui`（或 `npm run start:tui`），**不会**随 stack 后台常驻。DataLink 为**外置**组件（deploy 不会安装或启动）——如需使用，稍后在 Web 的 MCP 配置中连接外部服务即可。部署时不要求填写模型 Key——登录后在 Web 中创建并启用模型即可。**不支持**原生 Windows / macOS。
+`./deploy.sh` 自动生成配置、安装依赖、构建（含 Web、API 与 TUI），并以 detached 后台进程启动 Web + API——关闭终端一般不会停止服务。TUI 会在部署时构建就绪，但它是前台交互客户端：请另开终端执行 `./deploy.sh tui`（或 `npm run start:tui`），**不会**随 stack 后台常驻。DataLink 为**外置**组件（deploy 不会安装或启动）——如需使用，稍后在 Web 的 MCP 配置中连接外部服务即可。部署时不要求填写模型 Key——登录后在 Web 中创建并启用模型即可。Linux、macOS 与 Windows Git Bash 用 `./deploy.sh`；Windows 命令提示符或 PowerShell 用 `deploy.cmd`。
 
 ```bash
 git clone https://github.com/datagallery-lab/datafoundry.git
@@ -102,9 +102,9 @@ cd datafoundry
 
 打开 `http://127.0.0.1:3000/login` 注册登录，在模型配置中创建 OpenAI-compatible Profile，然后进入 `/data-tasks`。远程部署请设置 `AUTH_PUBLIC_BASE_URL`；重复执行 `./deploy.sh deploy` 会进入维护窗口（先停止旧进程再安装/构建）。
 
-### Windows / macOS / 其他：手动 npm
+### 手动 npm
 
-原生 Windows、macOS 或其他非 Ubuntu/Debian 环境请用手动 npm。请在同一环境内安装和运行；Windows 用户不要在 Windows 和 WSL 之间共用 `node_modules`。
+需要手改环境变量或拆分进程时走手动 npm。请在同一环境内安装和运行；Windows 用户不要在 Windows 和 WSL 之间共用 `node_modules`。
 
 ```bash
 git clone https://github.com/datagallery-lab/datafoundry.git

@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -9,7 +11,9 @@ async function defaultRun(command, args = [], options = {}) {
     const child = spawn(command, args, {
       cwd: options.cwd ?? ROOT,
       env: options.env ?? process.env,
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: process.platform === "win32" && command !== "node",
+      windowsHide: true
     });
     let stdout = "";
     let stderr = "";
@@ -47,7 +51,40 @@ async function safeRun(run, command, args = []) {
   }
 }
 
+function nodePrefix() {
+  return process.env.DATAFOUNDRY_NODE_PREFIX || path.join(os.homedir(), ".local", "share", "datafoundry", "node");
+}
+
+export function activateNodePrefix() {
+  const prefix = nodePrefix();
+  const candidates = [path.join(prefix, "bin"), prefix];
+  const executable = process.platform === "win32" ? "node.exe" : "node";
+  for (const bin of candidates) {
+    if (!existsSync(path.join(bin, executable)) && !(process.platform !== "win32" && existsSync(path.join(bin, "node")))) {
+      continue;
+    }
+    const parts = (process.env.PATH ?? "").split(path.delimiter);
+    if (!parts.includes(bin)) {
+      process.env.PATH = `${bin}${path.delimiter}${process.env.PATH ?? ""}`;
+    }
+    return bin;
+  }
+  return null;
+}
+
+function isDebianFamily() {
+  try {
+    const text = readFileSync("/etc/os-release", "utf8");
+    const match = /^ID=(?:"([^"]+)"|(\S+))/mu.exec(text);
+    const id = match?.[1] || match?.[2] || "";
+    return id === "ubuntu" || id === "debian";
+  } catch {
+    return false;
+  }
+}
+
 export async function inspectDependencies(options = {}) {
+  activateNodePrefix();
   const run = options.run ?? defaultRun;
   const entries = [];
 
@@ -77,6 +114,8 @@ export async function inspectDependencies(options = {}) {
 }
 
 async function canInstallNonInteractive(options, run) {
+  const privileged = options.privilegedInstall ?? isDebianFamily();
+  if (!privileged) return true;
   if ((options.uid ?? process.getuid?.() ?? 1000) === 0) return true;
   const result = await safeRun(run, "sudo", ["-n", "true"]);
   return !result.error;
@@ -86,11 +125,27 @@ export async function ensureDependencies(options = {}) {
   const run = options.run ?? defaultRun;
   const ask = options.ask;
   const install = options.install ?? (async (action, installOptions = {}) => {
+    if (process.platform === "win32") {
+      const args = [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        path.join(ROOT, "deploy.ps1")
+      ];
+      if (installOptions.nonInteractive) args.push("--non-interactive");
+      await run("powershell.exe", args, {
+        env: { ...process.env, DATAFOUNDRY_INSTALL_NODE_ONLY: "1" }
+      });
+      activateNodePrefix();
+      return;
+    }
     const args = [path.join(ROOT, "scripts/deploy/install-dependency.sh"), action];
     if (installOptions.nonInteractive) {
       args.push("--non-interactive");
     }
     await run("bash", args);
+    activateNodePrefix();
   });
   const print = options.print ?? ((message) => process.stdout.write(`${message}\n`));
 

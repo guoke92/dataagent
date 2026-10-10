@@ -63,14 +63,13 @@ type GovernedResultInput = {
 
 export type ToolRegistry = {
   lookupValues(input: { datasource_id?: string; literal: string }): Promise<{ hits: unknown[] }>;
-  recallWiki(input: { query: string; top_k?: number }): Promise<{ hits: unknown[] }>;
+  recallWiki(input: { query: string; top_k?: number }): Promise<unknown>;
   inspectSchema(
     input?: { datasource_id?: string; table_names?: string[] },
     options?: DataToolExecutionOptions,
   ): Promise<InspectSchemaResult>;
   listDataSources(input?: { enabled_only?: boolean }): Promise<unknown>;
   mastraTools: {
-    inspect_schema: ReturnType<typeof createTool>;
     list_data_sources: ReturnType<typeof createTool>;
     lookup_values: ReturnType<typeof createTool>;
     preview_table: ReturnType<typeof createTool>;
@@ -120,6 +119,16 @@ export const createDataFoundryToolRegistry = (input: CreateDataFoundryToolRegist
   const resultMetadata = new WeakMap<object, { datasourceId: string; stepId: string }>();
   const sqlResultCache = new Map<string, RawSqlToolResult>();
 
+  const rememberSchema = (datasourceId: string, projection: { revision: string | number; dialect?: string }): string => {
+    const schema_id = `wiki_${projection.revision}`;
+    state.schema_capabilities.set(schema_id, {
+      datasource_id: datasourceId,
+      ...(projection.dialect ? { dialect: projection.dialect } : {}),
+      schema_id
+    });
+    return schema_id;
+  };
+
   const listDataSources = async (toolInput: { enabled_only?: boolean } = {}): Promise<unknown> => {
     throwIfAborted(input.abortSignal);
     const allowedIds = new Set(input.runContext.enabled_datasource_ids ?? []);
@@ -151,23 +160,39 @@ export const createDataFoundryToolRegistry = (input: CreateDataFoundryToolRegist
     };
   };
 
-  const recallWiki = async (toolInput: { query: string; top_k?: number }): Promise<{ hits: unknown[] }> => {
+  const recallWiki = async (toolInput: { query: string; top_k?: number }): Promise<unknown> => {
     throwIfAborted(input.abortSignal);
     const workspaceId = input.runContext.workspace_id ?? "default";
-    const hits = (await input.wikiCatalog.recall(
+    const recalled = await input.wikiCatalog.recallKnowledge(
       workspaceId,
       toolInput.query,
       input.runContext.enabled_datasource_ids
-    ))
-      .filter((hit) => WIKI_RECALL_TYPES.has(hit.type))
-      .slice(0, toolInput.top_k ?? 8)
-      .map((hit) => ({
+    );
+    const limit = toolInput.top_k ?? 8;
+    const datasourceId = input.runContext.selected_datasource_id
+      ?? (input.runContext.enabled_datasource_ids?.length === 1 ? input.runContext.enabled_datasource_ids[0] : undefined);
+    const projection = datasourceId
+      ? input.wikiCatalog.projectSchema(workspaceId, datasourceId, [])
+      : undefined;
+    const schema_id = datasourceId && projection ? rememberSchema(datasourceId, projection) : undefined;
+    return {
+      ...(schema_id ? { schema_id } : {}),
+      values: {
+        mentions: recalled.mentions,
+        ambiguous: recalled.ambiguous,
+        unlinked: recalled.unlinked
+      },
+      semantic: recalled.terms.slice(0, limit).map((hit) => ({
         page_id: hit.page_id,
         type: hit.type,
         title: hit.title,
         excerpt: hit.excerpt
-      }));
-    return { hits };
+      })),
+      logical: {
+        tables: recalled.tables,
+        relations: recalled.relations
+      }
+    };
   };
 
   const inspectSchema = async (
@@ -195,12 +220,7 @@ export const createDataFoundryToolRegistry = (input: CreateDataFoundryToolRegist
         toolInput.table_names
       );
       if (!wikiProjection) throw new Error("WIKI_KNOWLEDGE_UNAVAILABLE");
-      const schema_id = `wiki_${wikiProjection.revision}`;
-      state.schema_capabilities.set(schema_id, {
-        datasource_id: datasourceId,
-        ...(wikiProjection.dialect ? { dialect: wikiProjection.dialect } : {}),
-        schema_id
-      });
+      const schema_id = rememberSchema(datasourceId, wikiProjection);
       const rawResult = {
         datasource_id: datasourceId,
         ...(wikiProjection.dialect ? { dialect: wikiProjection.dialect } : {}),
@@ -291,7 +311,7 @@ export const createDataFoundryToolRegistry = (input: CreateDataFoundryToolRegist
         state.artifact_ids.push(result.artifact_id);
       }
       emitSqlReferences(input, datasourceId, result);
-      void input.wikiCatalog.fileBackAcceptedSql({
+      if (!/information_schema/iu.test(toolInput.sql)) void input.wikiCatalog.fileBackAcceptedSql({
         workspaceId: input.runContext.workspace_id ?? "default",
         sourceId: `sql-${input.runContext.run_id}-${state.sql_execution_count}`,
         sql: toolInput.sql,
@@ -376,7 +396,6 @@ export const createDataFoundryToolRegistry = (input: CreateDataFoundryToolRegist
     lookupValues,
     recallWiki,
     mastraTools: createMastraDataTools({
-      inspectSchema,
       listDataSources,
       lookupValues,
       previewTable,
@@ -390,16 +409,6 @@ export const createDataFoundryToolRegistry = (input: CreateDataFoundryToolRegist
     state
   };
 };
-
-const WIKI_RECALL_TYPES = new Set([
-  "table",
-  "concept",
-  "metric",
-  "relation",
-  "value-domain",
-  "query-pattern",
-  "contradiction"
-]);
 
 const sqlCacheKey = (input: {
   schema_id: string;
@@ -415,7 +424,7 @@ const sqlCacheKey = (input: {
 
 type DataToolExecutors = Pick<
   ToolRegistry,
-  "inspectSchema" | "listDataSources" | "lookupValues" | "previewTable" | "recallWiki" | "runSqlReadonly"
+  "listDataSources" | "lookupValues" | "previewTable" | "recallWiki" | "runSqlReadonly"
 >;
 
 const createMastraDataTools = (executors: DataToolExecutors): ToolRegistry["mastraTools"] => ({
@@ -430,9 +439,11 @@ const createMastraDataTools = (executors: DataToolExecutors): ToolRegistry["mast
   recall_wiki: createTool({
     id: "recall_wiki",
     description:
-      "Recall compiled Wiki knowledge. This is the only knowledge surface: logical pages (tables, relations, value domains) "
-      + "and semantic pages (concepts, metrics, query patterns, contradictions). Imported documents are compiled into Wiki "
-      + "and are not retrieved raw.",
+      "Retrieve knowledge for one question and return schema_id for later SQL. "
+      + "values: literals linked to a column, ambiguous value hits, and spans with no value hit. Value-domain pages are not searched. "
+      + "semantic: business terms, metrics, rules, and approved query patterns. "
+      + "logical: the anchored tables (labels, examples, dictionary labels, ranges) and relations among those tables. "
+      + "Pass schema_id to run_sql_readonly.",
     inputSchema: z.object({
       query: z.string().min(1),
       top_k: z.number().int().min(1).max(20).optional()
@@ -444,7 +455,10 @@ const createMastraDataTools = (executors: DataToolExecutors): ToolRegistry["mast
   }),
   lookup_values: createTool({
     id: "lookup_values",
-    description: "Look up an open literal in the compiled value index. A hit is candidate evidence, not a confirmed WHERE.",
+    description:
+      "Look up one literal in the value index and return the columns that store it. "
+      + "Does not search terms, tables, or relations. recall_wiki already links values found in the question; "
+      + "use this when you have a specific literal to check.",
     inputSchema: z.object({
       datasource_id: z.string().optional(),
       literal: z.string().min(1)
@@ -454,26 +468,11 @@ const createMastraDataTools = (executors: DataToolExecutors): ToolRegistry["mast
       literal: toolInput.literal
     })
   }),
-  inspect_schema: createTool({
-    id: "inspect_schema",
-    description:
-      "Inspect a datasource schema and return a run-local schema_id that must precede SQL or preview calls.",
-    inputSchema: z.object({
-      datasource_id: z.string().optional(),
-      table_names: z.array(z.string()).optional()
-    }),
-    execute: (toolInput, options) =>
-      executors.inspectSchema(
-        {
-          ...(toolInput.datasource_id ? { datasource_id: toolInput.datasource_id } : {}),
-          ...(toolInput.table_names ? { table_names: toolInput.table_names } : {}),
-        },
-        executionOptionsFromMastra(options),
-      ),
-  }),
   preview_table: createTool({
     id: "preview_table",
-    description: "Preview a table using a schema_id returned by inspect_schema in this run.",
+    description:
+      "Read a few live rows to see values that occur together. Column examples, labels, and ranges are already on the recalled table. "
+      + "Use this only when those are not enough.",
     inputSchema: z.object({
       schema_id: z.string(),
       table: z.string().min(1),

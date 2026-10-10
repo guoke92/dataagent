@@ -348,6 +348,51 @@ export class ConfigJobRepository {
     return this.get({ id, workspace_id: input.workspace_id, user_id: input.user_id });
   }
 
+  findActive(input: {
+    workspace_id: string;
+    user_id: string;
+    type: string;
+    resource_id: string;
+  }): JobRecord | undefined {
+    return mapJob(this.db.prepare(`
+      SELECT * FROM config_jobs
+      WHERE workspace_id = ? AND user_id = ? AND type = ? AND resource_id = ?
+        AND status IN ('queued', 'running')
+      ORDER BY created_at DESC
+      LIMIT 1
+    `).get(input.workspace_id, input.user_id, input.type, input.resource_id));
+  }
+
+  latest(input: {
+    workspace_id: string;
+    user_id: string;
+    type: string;
+    resource_id: string;
+  }): JobRecord | undefined {
+    return mapJob(this.db.prepare(`
+      SELECT * FROM config_jobs
+      WHERE workspace_id = ? AND user_id = ? AND type = ? AND resource_id = ?
+      ORDER BY created_at DESC
+      LIMIT 1
+    `).get(input.workspace_id, input.user_id, input.type, input.resource_id));
+  }
+
+  /** Latest job for a resource other than the one currently executing. */
+  latestExcept(input: {
+    workspace_id: string;
+    user_id: string;
+    type: string;
+    resource_id: string;
+    exclude_id: string;
+  }): JobRecord | undefined {
+    return mapJob(this.db.prepare(`
+      SELECT * FROM config_jobs
+      WHERE workspace_id = ? AND user_id = ? AND type = ? AND resource_id = ? AND id != ?
+      ORDER BY created_at DESC
+      LIMIT 1
+    `).get(input.workspace_id, input.user_id, input.type, input.resource_id, input.exclude_id));
+  }
+
   /** Return one job in the current workspace scope. */
   get(input: { id: string; workspace_id: string; user_id: string }): JobRecord {
     const record = mapJob(this.db.prepare(`

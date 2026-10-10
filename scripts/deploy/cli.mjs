@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { constants, existsSync } from "node:fs";
-import { access, appendFile, copyFile, mkdir, readFile, stat, statfs, writeFile } from "node:fs/promises";
+import { access, appendFile, copyFile, mkdir, open, readFile, stat, statfs, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import os from "node:os";
 import path from "node:path";
@@ -123,7 +123,7 @@ export async function collectManagedPorts(env = {}, state = null, options = {}) 
   const alive = options.isAlive ?? isProcessAlive;
   if (!alive(state.pid)) return ports;
 
-  if (process.platform === "linux" || options.forceLaunchIdCheck) {
+  if (process.platform === "linux" || process.platform === "darwin" || options.forceLaunchIdCheck) {
     const verification = await verifyManagedProcessForStop(state.pid, state.launchId, {
       readLaunchId: options.readLaunchId,
       forceLaunchIdCheck: options.forceLaunchIdCheck
@@ -376,12 +376,75 @@ async function loadRootEnvText(root) {
   }
 }
 
+async function readLogTail(logPath, maxLines) {
+  const fh = await open(logPath, "r");
+  try {
+    const info = await fh.stat();
+    const size = info.size;
+    const window = Math.min(size, 256 * 1024);
+    const buf = Buffer.alloc(window);
+    if (window > 0) await fh.read(buf, 0, window, size - window);
+    let text = buf.toString("utf8");
+    if (window < size) {
+      const newline = text.indexOf("\n");
+      if (newline >= 0) text = text.slice(newline + 1);
+    }
+    const lines = text.split(/\r?\n/u);
+    return { text: lines.slice(-maxLines).join("\n"), position: size };
+  } finally {
+    await fh.close();
+  }
+}
+
+async function followRuntimeLog(logPath) {
+  await mkdir(path.dirname(logPath), { recursive: true });
+  if (!existsSync(logPath)) {
+    await writeFile(logPath, "", { encoding: "utf8", mode: 0o600 });
+  }
+
+  const initial = await readLogTail(logPath, 200);
+  if (initial.text) {
+    process.stdout.write(initial.text.endsWith("\n") ? initial.text : `${initial.text}\n`);
+  }
+  let position = initial.position;
+
+  await new Promise((resolve) => {
+    const timer = setInterval(async () => {
+      try {
+        const info = await stat(logPath);
+        if (info.size < position) position = 0;
+        if (info.size === position) return;
+        const fh = await open(logPath, "r");
+        try {
+          const length = info.size - position;
+          const buf = Buffer.alloc(length);
+          await fh.read(buf, 0, length, position);
+          process.stdout.write(buf);
+          position = info.size;
+        } finally {
+          await fh.close();
+        }
+      } catch {
+        // The log may be rotating.
+      }
+    }, 400);
+    const stop = () => {
+      clearInterval(timer);
+      resolve();
+    };
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+  });
+}
+
 function runCommand(command, args, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd: options.cwd ?? ROOT,
       env: options.env ?? process.env,
-      stdio: options.log ? ["ignore", "pipe", "pipe"] : (options.stdio ?? "inherit")
+      stdio: options.log ? ["ignore", "pipe", "pipe"] : (options.stdio ?? "inherit"),
+      shell: process.platform === "win32",
+      windowsHide: true
     });
 
     if (options.log) {
@@ -611,9 +674,7 @@ function createRealDeps(context) {
     },
     async logs() {
       const logPath = deploymentPaths(root).runtimeLog;
-      await mkdir(path.dirname(logPath), { recursive: true });
-      if (!existsSync(logPath)) await runCommand("touch", [logPath]);
-      await runCommand("tail", ["-n", "200", "-F", logPath]);
+      await followRuntimeLog(logPath);
     },
     async doctor() {
       await runDeploymentDoctor(root, { print });

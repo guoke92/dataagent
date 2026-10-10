@@ -219,7 +219,7 @@ export const reduceDataAnalysisAction = (
   actionName: string,
   result: unknown
 ): DataAnalysisState => {
-  if (actionName === "inspect_schema") {
+  if (actionName === "inspect_schema" || (actionName === "recall_wiki" && (recordString(result, "schema_id") ?? recordString(result, "schemaId")))) {
     const dialect = recordString(result, "dialect") ?? nestedString(result, "summary", "dialect");
     const schemaId = recordString(result, "schema_id") ?? recordString(result, "schemaId");
     return updateCoreRequirement({
@@ -433,7 +433,7 @@ export const reduceDataAnalysisAction = (
 };
 
 const allowedRecoveryActions = (state: DataAnalysisState): string[] => {
-  if (!state.schemaInspected) return ["inspect_schema", "semantic.context.resolve"];
+  if (!state.schemaInspected) return ["recall_wiki", "semantic.context.resolve"];
   if (!state.semanticResolved) return ["semantic.context.resolve"];
   if (!state.contractGrounded) return ["analysis.contract.ground"];
   if (!state.queryPlanned) return ["data.query.plan"];

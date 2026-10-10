@@ -96,6 +96,7 @@ export type RunSqlReadonlyInput = {
   run_id?: string;
   limit?: number;
   timeout_ms?: number;
+  purpose?: "wiki-scan";
   /**
    * Optional correlation handles (R-018). When provided, the produced table artifact
    * records them in `metadata_json` so the frontend Detail view can link the SQL result
@@ -116,6 +117,7 @@ export type SchemaSummary = {
       name: string;
       type: string;
       nullable?: boolean;
+      comment?: string;
     }>;
   }>;
 };

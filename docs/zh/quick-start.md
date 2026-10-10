@@ -4,27 +4,31 @@
 
 | 路径 | 适用环境 | 入口 |
 | --- | --- | --- |
-| **推荐：一键部署** | Ubuntu / Debian | `./deploy.sh`（配置、依赖、构建含 TUI、detached 后台启动 Web/API 与健康检查一次完成） |
-| **手动 npm** | Windows、macOS、其他 Linux，或需要手改环境变量时 | `npm install` → 配置 `.env` → `npm run build` / `build:web` → `npm run start` |
+| **推荐：一键部署** | Linux、macOS、Windows | `./deploy.sh`（Windows 也可运行 `deploy.cmd`；配置、依赖、构建含 TUI、detached 后台启动 Web/API 与健康检查一次完成） |
+| **手动 npm** | 需要手改环境变量或拆分进程时 | `npm install` → 配置 `.env` → `npm run build` / `build:web` → `npm run start` |
 
 部署完成后在 Web 中配置模型，再用内置 DTC Growth Review 数据源跑通一次分析。本版本**不提供** Docker / Compose。
 
 ## 环境要求
 
-- **一键部署**：Ubuntu 或 Debian（x86_64 / aarch64）；Node.js 22（缺失时脚本可在确认后协助安装）
-- **手动 npm**：Linux、macOS 或 Windows；Node.js >= 22 与 npm
+- **一键部署**：Linux、macOS 或 Windows（x86_64 / arm64）；Node.js 22（缺失时脚本可在确认后协助安装）。Windows 原生命令行用 `deploy.cmd`，Git Bash 用 `./deploy.sh`
+- **手动 npm**：同一套系统；Node.js >= 22 与 npm
 - 可选外置 [DataLink](guides/datalink.md)：需要语义图谱能力时单独运行（一键部署不依赖）
 
 请在同一环境内安装和运行项目。Windows 用户不要在 Windows 和 WSL 之间共用 `node_modules`。
 
-## 推荐：Ubuntu / Debian 一键部署
+## 推荐：一键部署
 
-`./deploy.sh` **不支持**原生 Windows / macOS（请改用下文手动 npm）。
+Linux、macOS 与 Windows Git Bash 使用 `./deploy.sh`。Windows 命令提示符或 PowerShell 使用 `deploy.cmd`（已安装 Git Bash 时会转调 `deploy.sh`，否则走 `deploy.ps1`）。
 
 ```bash
 git clone https://github.com/datagallery-lab/datafoundry.git
 cd datafoundry
 ./deploy.sh
+```
+
+```bat
+deploy.cmd
 ```
 
 部署成功后 Web + API 在后台常驻（独立进程组）。关闭终端，或在 `./deploy.sh logs` 中按 `Ctrl+C`，**都不会**停止 DataFoundry——停止请用 `./deploy.sh stop`。一键部署会一并构建 TUI，但 TUI **不会**随 stack 后台常驻；需要时另开终端按成功提示启动（见下文「启动 TUI」）。
@@ -79,9 +83,9 @@ cd datafoundry
 
 名称/id 包含 `datalink` 即可被 DataLink 面板识别。
 
-## Windows / macOS / 其他：手动 npm 部署
+## 手动 npm 部署
 
-`./deploy.sh` **仅面向 Ubuntu / Debian**，不支持原生 Windows / macOS。在 Windows、macOS 或其他发行版上，请按下列步骤用 npm 安装、配置并启动。需要手改环境变量或拆分进程时，也可走这条路径。两种正式态都**不要跑** `npm run dev`。贡献者热更新见文末附录。
+需要手改环境变量或拆分进程时，可以不走一键部署，按下列步骤用 npm 安装、配置并启动。两种正式态都**不要跑** `npm run dev`。贡献者热更新见文末附录。
 
 正式态对照：
 

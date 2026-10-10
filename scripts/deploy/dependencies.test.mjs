@@ -51,6 +51,7 @@ test("non-interactive install requires root or passwordless sudo", async () => {
       nonInteractive: true,
       uid: 1000,
       ask: async () => assert.fail("must not prompt"),
+      privilegedInstall: true,
       run: runner({
         "node --version": { stdout: "v20.0.0\n" },
         "npm --version": { stdout: "10.0.0\n" },

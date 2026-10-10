@@ -97,7 +97,7 @@ import {
   resolveStepSummaryText,
   resolveToolStepActionLabel,
 } from "./step-display-label";
-import { JobProgressBanner } from "./components/JobProgressBanner";
+import { JobInlineStatus, isLiveJob } from "./components/JobProgressBanner";
 import {
   formatConfigTestError,
   formatConfigTestResult,
@@ -1422,7 +1422,13 @@ function DataTaskWorkspace({
     async (kind: WorkspaceConfigKind, item: WorkspaceConfigItem) => {
       setConfigActionError(null);
       try {
-        return await updateItem(kind, item);
+        const updated = await updateItem(kind, item);
+        if (updated.scanJob) {
+          setActiveJob(updated.scanJob);
+          const finished = await pollJob(updated.scanJob.id, setActiveJob);
+          setActiveJob(finished);
+        }
+        return updated;
       } catch (error) {
         setConfigActionError(
           error instanceof Error ? error.message : "Failed to save configuration",
@@ -1430,7 +1436,7 @@ function DataTaskWorkspace({
         throw error;
       }
     },
-    [updateItem],
+    [pollJob, updateItem],
   );
 
   const addConfigItem = useCallback(
@@ -1455,11 +1461,16 @@ function DataTaskWorkspace({
       }
       setConfigActionError(null);
       try {
-        const createdId = await createItem(kind, created, skillFile);
+        const saved = await createItem(kind, created, skillFile);
         if (kind === "llm") {
-          setActiveLlmId(createdId);
+          setActiveLlmId(saved.id);
         }
-        return createdId;
+        if (saved.scanJob) {
+          setActiveJob(saved.scanJob);
+          const finished = await pollJob(saved.scanJob.id, setActiveJob);
+          setActiveJob(finished);
+        }
+        return saved.id;
       } catch (error) {
         setConfigActionError(
           error instanceof Error ? error.message : "Failed to create configuration",
@@ -1467,7 +1478,7 @@ function DataTaskWorkspace({
         throw error;
       }
     },
-    [createItem],
+    [createItem, pollJob],
   );
 
   const activeSession =
@@ -2216,7 +2227,13 @@ function DataTaskWorkspace({
         <WikiCatalogPanel
           onBack={closeWikiPanel}
           onCount={setWikiPageCount}
-          datasources={workspaceConfig.db.map((item) => ({ id: item.id, name: item.name }))}
+          datasources={workspaceConfig.db.map((item) => ({
+            id: item.id,
+            name: item.name,
+            description: item.description,
+            type: item.settings?.type,
+            summary: summarizeDatasourceConnection(item),
+          }))}
           defaultDatasourceId={activeDatasourceId ?? undefined}
         />
       ) : dataLinkPanelOpen ? (
@@ -2241,13 +2258,6 @@ function DataTaskWorkspace({
               {sidePanelError}
             </div>
           )}
-          <JobProgressBanner
-            job={activeJob}
-            onCancel={(jobId) =>
-              cancelJob(jobId).then((job) => setActiveJob(job))
-            }
-            onDismiss={() => setActiveJob(null)}
-          />
           <WorkspaceConfigPanel
             panel={configPanel}
             items={workspaceConfig[configPanel]}
@@ -2260,6 +2270,8 @@ function DataTaskWorkspace({
             onSaveItem={(item) => saveConfigItem(configPanel, item)}
             onDeleteItem={(itemId) => deleteItem(configPanel, itemId)}
             onTestItem={(itemId) => testItem(configPanel, itemId)}
+            scanJob={activeJob}
+            onCancelScan={(jobId) => cancelJob(jobId).then((job) => setActiveJob(job))}
             onIntrospect={
               configPanel === "db"
                 ? async (itemId) => {
@@ -2267,6 +2279,12 @@ function DataTaskWorkspace({
                     setActiveJob(job);
                     const finished = await pollJob(job.id, setActiveJob);
                     setActiveJob(finished);
+                    if (finished.status === "failed") {
+                      throw new Error(finished.error?.message || t("wiki.scanFailed"));
+                    }
+                    if (finished.status === "canceled") {
+                      throw new Error(t("wiki.scanCanceled"));
+                    }
                   }
                 : undefined
             }
@@ -5275,6 +5293,8 @@ function WorkspaceConfigPanel({
   onDeleteItem,
   onTestItem,
   onIntrospect,
+  scanJob,
+  onCancelScan,
   onReindex,
   onUploadKnowledgeFile,
   onListKnowledgeFiles,
@@ -5303,6 +5323,8 @@ function WorkspaceConfigPanel({
   onDeleteItem: (itemId: string) => Promise<void>;
   onTestItem: (itemId: string) => Promise<Record<string, unknown>>;
   onIntrospect?: (itemId: string) => Promise<void>;
+  scanJob?: JobDto | null;
+  onCancelScan?: (jobId: string) => void | Promise<void>;
   onReindex?: (itemId: string) => Promise<void>;
   onUploadKnowledgeFile?: (itemId: string, file: File, datasourceIds?: string[]) => Promise<void>;
   onListKnowledgeFiles?: (itemId: string) => Promise<{ documents: KnowledgeDocumentDto[] }>;
@@ -5558,8 +5580,8 @@ function WorkspaceConfigPanel({
         </div>
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
-        <div className="w-full space-y-4">
+      <div className={`min-h-0 flex-1 px-6 py-5 ${explorerItem ? "flex flex-col overflow-hidden" : "overflow-y-auto"}`}>
+        <div className={explorerItem ? "flex min-h-0 w-full flex-1 flex-col gap-4" : "w-full space-y-4"}>
           {panelError ? (
             <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">
               {panelError}
@@ -5587,6 +5609,8 @@ function WorkspaceConfigPanel({
           ) : explorerItem ? (
             <DatasourceExplorerPanel
               item={explorerItem}
+              scanJob={scanJob}
+              onCancelScan={onCancelScan}
               onBack={() => setExplorerItemId(null)}
               onEdit={() => {
                 setExplorerItemId(null);
@@ -5655,6 +5679,8 @@ function WorkspaceConfigPanel({
               mode={isCreating ? "create" : "edit"}
               panel={panel}
               workspaceConfig={workspaceConfig}
+              scanJob={scanJob}
+              onCancelScan={onCancelScan}
               onCreate={() => {
                 void handleCreate();
               }}
@@ -5737,6 +5763,7 @@ function WorkspaceConfigPanel({
                 !isCreating && onIntrospect
                   ? async () => {
                       setActionBusy(true);
+                      setPanelError(null);
                       try {
                         await onIntrospect(detailItem.id);
                       } catch (error) {
@@ -6606,6 +6633,8 @@ function ConfigItemDetailView({
   mode,
   panel,
   workspaceConfig,
+  scanJob,
+  onCancelScan,
   onCreate,
   createDisabled,
   onUpdate,
@@ -6628,6 +6657,8 @@ function ConfigItemDetailView({
   mode: "create" | "edit";
   panel: WorkspaceConfigPanelKey;
   workspaceConfig: WorkspaceConfigStore;
+  scanJob?: JobDto | null;
+  onCancelScan?: (jobId: string) => void | Promise<void>;
   onCreate: () => void;
   createDisabled?: boolean;
   onUpdate: (
@@ -6772,7 +6803,11 @@ function ConfigItemDetailView({
             />
           ) : null}
           {onIntrospect ? (
-            <RecompileButton onClick={() => onIntrospect()} />
+            <RecompileButton
+              onClick={() => onIntrospect()}
+              job={scanJob && (scanJob.resource_id === item.id || scanJob.resourceId === item.id) ? scanJob : null}
+              onCancel={onCancelScan}
+            />
           ) : null}
           {onReindex ? (
             <ActionButton label={t("configPanel.reindex")} onClick={() => void onReindex()} />
@@ -6948,25 +6983,38 @@ function ConfigItemDetailView({
   );
 }
 
-function RecompileButton({ onClick }: { onClick: () => void | Promise<void> }) {
+function RecompileButton({
+  onClick,
+  job,
+  onCancel,
+}: {
+  onClick: () => void | Promise<void>;
+  job?: JobDto | null;
+  onCancel?: (jobId: string) => void | Promise<void>;
+}) {
   const t = useT();
   const [phase, setPhase] = useState<"idle" | "run" | "done" | "err">("idle");
-  const label = phase === "run"
-    ? t("wiki.recompileRunning")
+  const live = isLiveJob(job);
+  const running = live || phase === "run";
+  const label = running
+    ? `${t("wiki.recompileRunning")}${job ? ` ${job.progress}%` : ""}`
     : phase === "done"
       ? t("wiki.recompileDone")
       : phase === "err"
         ? t("wiki.loadFailed")
         : t("wiki.recompile");
   return (
-    <ActionButton
-      label={label}
-      disabled={phase === "run"}
-      onClick={() => {
-        setPhase("run");
-        void Promise.resolve(onClick()).then(() => setPhase("done")).catch(() => setPhase("err"));
-      }}
-    />
+    <div className="flex min-w-0 flex-wrap items-center gap-2">
+      <ActionButton
+        label={label}
+        disabled={running}
+        onClick={() => {
+          setPhase("run");
+          void Promise.resolve(onClick()).then(() => setPhase("done")).catch(() => setPhase("err"));
+        }}
+      />
+      <JobInlineStatus job={job} updatedAt={job?.finished_at} onCancel={onCancel} />
+    </div>
   );
 }
 

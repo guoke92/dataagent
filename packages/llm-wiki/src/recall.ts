@@ -1,11 +1,12 @@
 import {
+  columnLane,
   isDictionaryCandidate,
   isIdentifierColumn,
   isMeasureColumn,
   isTemporalColumn,
   type ColumnProfile
 } from "./relations.js";
-import type { PageStatus, WikiField } from "./types.js";
+import type { ColumnLane, PageStatus, WikiField } from "./types.js";
 
 export type ColumnRole = "identifier" | "temporal" | "measure" | "dictionary" | "attribute";
 
@@ -18,6 +19,8 @@ export type ColumnRecord = {
   label: string;
   labelStatus: PageStatus;
   role: ColumnRole;
+  lane: ColumnLane;
+  encrypted: boolean;
   cardinality: number;
   nullRate: number;
   min?: string;
@@ -63,10 +66,13 @@ export const parseDictionaryLabels = (raw: string): string[] | undefined => {
   const labels: string[] = [];
   for (const line of clean.split("\n")) {
     const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#") || trimmed.includes("[[")) continue;
+    if (!trimmed || trimmed.startsWith("#") || trimmed.includes("[[") || /^cardinality=/iu.test(trimmed) || /^kind=/iu.test(trimmed)) continue;
     if (trimmed.includes("\t")) {
-      const value = trimmed.split("\t")[0]?.trim();
-      if (value) labels.push(value);
+      const parts = trimmed.split("\t");
+      const value = parts[0]?.trim();
+      const label = parts[1]?.trim();
+      if (!value) continue;
+      labels.push(label && label !== value && !/^\d+(?:\.\d+)?$/u.test(label) ? `${value} = ${label}` : value);
       continue;
     }
     const freq = /^([^=×\n]+?)(?:\s*=\s*([^×\n]+?))?\s*×/u.exec(trimmed);
@@ -134,6 +140,7 @@ export const columnInfoText = (record: ColumnRecord): string => {
     `type: ${record.type}`,
     `nullable: ${record.nullable}`,
     record.primaryKey ? "primary_key: true" : "",
+    record.encrypted ? "encrypted: true" : "",
     record.comment ? `comment: ${record.comment}` : "",
     record.label && record.label !== record.comment ? `label: ${record.label}` : "",
     `基数 ${record.cardinality}`,
@@ -151,16 +158,14 @@ export const recallForSchema = (record: ColumnRecord, dictionaryLabels?: string[
   const range = record.min !== undefined && record.max !== undefined ? `${record.min} 到 ${record.max}` : undefined;
   const recalled: SchemaRecall = {};
   if (label) recalled.label = label;
-  if (record.role === "dictionary") {
-    if (dictionaryLabels && dictionaryLabels.length > 0) recalled.labels = dictionaryLabels;
-    return recalled;
-  }
-  if (record.role === "measure" || record.role === "temporal") {
+  if (record.encrypted) return recalled;
+  if (dictionaryLabels && dictionaryLabels.length > 0) recalled.labels = dictionaryLabels;
+  if (record.lane === "range" || record.role === "temporal" || record.role === "measure") {
     if (range) recalled.range = range;
     return recalled;
   }
-  if (record.role === "attribute") {
-    const examples = record.frequencies.slice(0, 3).map((item) => item.value);
+  if (record.lane === "domain") {
+    const examples = record.frequencies.slice(0, 8).map((item) => item.value);
     if (examples.length > 0) recalled.examples = examples;
   }
   return recalled;
@@ -169,7 +174,8 @@ export const recallForSchema = (record: ColumnRecord, dictionaryLabels?: string[
 export const recallForKnowledge = (record: ColumnRecord, dictionaryLabels?: string[]): string => {
   const label = record.label || record.comment || "";
   const range = record.min !== undefined && record.max !== undefined ? `范围 ${record.min} 到 ${record.max}` : "";
-  if (record.role === "identifier") return [record.name, record.type, label].filter(Boolean).join(" ");
+  if (record.encrypted) return [record.name, record.type, label, "加密列"].filter(Boolean).join(" ");
+  if (record.lane === "range" || record.role === "identifier") return [record.name, record.type, label, range].filter(Boolean).join(" ");
   if (record.role === "temporal") return [record.name, record.type, range].filter(Boolean).join(" ");
   if (record.role === "measure") {
     return [record.name, label, range, `空值率 ${(record.nullRate * 100).toFixed(1)}%`].filter(Boolean).join(" ");
@@ -206,6 +212,8 @@ const fieldFromRecord = (record: ColumnRecord): WikiField => ({
     primaryKey: record.primaryKey,
     ...(record.comment ? { comment: record.comment } : {}),
     role: record.role,
+    lane: record.lane,
+    encrypted: record.encrypted,
     cardinality: record.cardinality,
     nullRate: record.nullRate,
     ...(record.min !== undefined ? { min: record.min } : {}),
@@ -225,6 +233,8 @@ const metaOf = (profile: ColumnProfile, label: string, status: PageStatus): Colu
   label,
   labelStatus: status,
   role: columnRole(profile),
+  lane: profile.lane,
+  encrypted: profile.encrypted,
   cardinality: profile.cardinality,
   nullRate: profile.nullRate,
   ...(profile.min !== undefined ? { min: profile.min } : {}),
@@ -247,6 +257,8 @@ const readColumnField = (field: WikiField): ColumnRecord | undefined => {
     label: field.text.trim(),
     labelStatus: field.status,
     role: isRole(meta.role) ? meta.role : "attribute",
+    lane: isLane(meta.lane) ? meta.lane : columnLane({ name: field.key, type, primaryKey: meta.primaryKey === true }),
+    encrypted: meta.encrypted === true,
     cardinality: typeof meta.cardinality === "number" ? meta.cardinality : 0,
     nullRate: typeof meta.nullRate === "number" ? meta.nullRate : 0,
     frequencies: Array.isArray(meta.frequencies) ? meta.frequencies : [],
@@ -279,6 +291,8 @@ const recordFromLegacy = (name: string, fields: WikiField[]): ColumnRecord | und
     label,
     labelStatus: short?.status ?? profileField?.status ?? "pending",
     role: "attribute",
+    lane: "domain",
+    encrypted: false,
     cardinality: parsed.cardinality ?? 0,
     nullRate: parsed.nullRate ?? 0,
     frequencies: [],
@@ -299,9 +313,14 @@ const roleFromRecord = (record: ColumnRecord): ColumnRole => columnRole({
   type: record.type,
   nullable: record.nullable,
   primaryKey: record.primaryKey,
+  unique: record.primaryKey,
+  autoIncrement: false,
+  encrypted: record.encrypted,
+  lane: record.lane,
   samples: record.frequencies.map((item) => item.value),
   top: record.frequencies.map((item) => item.value),
   frequencies: record.frequencies,
+  observed: record.frequencies,
   sentinels: record.sentinels,
   cardinality: record.cardinality,
   nullRate: record.nullRate,
@@ -339,3 +358,6 @@ const parseMeta = (raw: string | undefined): ColumnMeta => {
 
 const isRole = (value: unknown): value is ColumnRole =>
   value === "identifier" || value === "temporal" || value === "measure" || value === "dictionary" || value === "attribute";
+
+const isLane = (value: unknown): value is ColumnLane =>
+  value === "skip" || value === "range" || value === "domain";

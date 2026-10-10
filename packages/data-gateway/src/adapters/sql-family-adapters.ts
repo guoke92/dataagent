@@ -86,12 +86,12 @@ export class MySqlAdapter implements DataSourceAdapter {
     throwIfAborted(input.signal);
     const database = stringConfig(this.config, "database");
     const rows = await this.query(`
-      SELECT table_name, column_name, data_type, is_nullable
+      SELECT table_name, column_name, data_type, is_nullable, column_comment
       FROM information_schema.columns
       WHERE table_schema = ?
       ORDER BY table_name, ordinal_position
     `, [database], input.signal);
-    return schemaRowsToSummary(rows, "TABLE_NAME", "COLUMN_NAME", "DATA_TYPE", "IS_NULLABLE");
+    return schemaRowsToSummary(rows, "TABLE_NAME", "COLUMN_NAME", "DATA_TYPE", "IS_NULLABLE", "COLUMN_COMMENT");
   }
 
   async previewTable(input: AdapterPreviewInput): Promise<TableResult> {
@@ -182,16 +182,19 @@ const schemaRowsToSummary = (
   tableKey: string,
   columnKey: string,
   typeKey: string,
-  nullableKey: string
+  nullableKey: string,
+  commentKey?: string
 ): Omit<SchemaSummary, "datasource_id"> => {
   const tables = new Map<string, SchemaSummary["tables"][number]>();
   rows.forEach((row) => {
     const tableName = requiredRecordStringLoose(row, tableKey);
     const table = tables.get(tableName) ?? { name: tableName, columns: [] };
+    const comment = commentKey ? optionalRecordStringLoose(row, commentKey) : "";
     table.columns.push({
       name: requiredRecordStringLoose(row, columnKey),
       type: requiredRecordStringLoose(row, typeKey),
-      nullable: requiredRecordStringLoose(row, nullableKey).toUpperCase() === "YES"
+      nullable: requiredRecordStringLoose(row, nullableKey).toUpperCase() === "YES",
+      ...(comment ? { comment } : {})
     });
     tables.set(tableName, table);
   });
@@ -226,6 +229,12 @@ const numberConfig = (config: Record<string, unknown>, key: string, defaultValue
 const quoteIdentifier = (identifier: string): string => `"${identifier.replaceAll('"', '""')}"`;
 
 const quoteMysqlIdentifier = (identifier: string): string => `\`${identifier.replaceAll("`", "``")}\``;
+
+const optionalRecordStringLoose = (row: unknown, key: string): string => {
+  if (!isRecord(row)) return "";
+  const value = row[key] ?? row[key.toUpperCase()] ?? row[key.toLowerCase()];
+  return typeof value === "string" ? value.trim() : "";
+};
 
 const requiredRecordStringLoose = (row: unknown, key: string): string => {
   if (!isRecord(row)) {

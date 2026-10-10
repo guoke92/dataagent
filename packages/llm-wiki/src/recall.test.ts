@@ -31,4 +31,15 @@ describe("dictionary label parsing", () => {
       "1 = 完成"
     ]);
   });
+
+  it("skips cardinality metadata lines", () => {
+    expect(parseDictionaryLabels("cardinality=3\n0\t1\t0.500\n1\t1\t0.500")).toEqual(["0", "1"]);
+  });
+
+  it("keeps labels from dictionary tab rows", () => {
+    expect(parseDictionaryLabels("kind=dictionary\n0\t新建\t3\t0.500\n1\t完成\t3\t0.500")).toEqual([
+      "0 = 新建",
+      "1 = 完成"
+    ]);
+  });
 });

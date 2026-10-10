@@ -345,10 +345,16 @@ export const configApi = {
     );
   },
 
-  refreshWikiTable(pageId: string, column?: string): Promise<WikiPageDto> {
-    return requestEnvelope<WikiPageDto>(
+  refreshWikiTable(pageId: string, column?: string): Promise<JobDto> {
+    return requestEnvelope<JobDto>(
       `/api/v1/llm-wiki/pages/${encodeURIComponent(pageId)}/refresh`,
       { method: "POST", body: JSON.stringify(column ? { column } : {}) },
+    );
+  },
+
+  getWikiScanJob(datasourceId: string): Promise<{ job: JobDto | null }> {
+    return requestEnvelope<{ job: JobDto | null }>(
+      `/api/v1/llm-wiki/scans/${encodeURIComponent(datasourceId)}`,
     );
   },
 
@@ -445,11 +451,12 @@ export const configApi = {
 
   getDatasourceSchema(
     id: string,
-    options: { q?: string; includeStats?: boolean } = {},
+    options: { q?: string; includeStats?: boolean; refresh?: boolean } = {},
   ): Promise<DatasourceSchemaDto> {
     const params = new URLSearchParams();
     if (options.q) params.set("q", options.q);
     if (options.includeStats) params.set("includeStats", "true");
+    if (options.refresh) params.set("refresh", "true");
     return requestEnvelope<DatasourceSchemaDto>(
       `/api/v1/datasources/${encodeURIComponent(id)}/schema${queryString(params)}`,
     );

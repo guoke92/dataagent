@@ -5,6 +5,7 @@ import type { LocalKnowledgeService } from "@datafoundry/knowledge";
 import type { LlmWiki } from "@datafoundry/llm-wiki";
 import type { MetadataStore } from "@datafoundry/metadata";
 import type { RunCancelRegistry } from "../run-cancel-registry.js";
+import type { WikiScanRunner } from "../wiki-scan.js";
 
 export type ConfigApiContext = {
   dataGateway: LocalDataGateway;
@@ -12,6 +13,7 @@ export type ConfigApiContext = {
   knowledgeService: LocalKnowledgeService;
   metadataStore: MetadataStore;
   llmWiki: LlmWiki;
+  wikiScanRunner: WikiScanRunner;
   runCancelRegistry: RunCancelRegistry;
   userId: string;
   workspaceId?: string;

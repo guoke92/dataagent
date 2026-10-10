@@ -28,6 +28,7 @@ export type PageType =
   | "column"
   | "relation"
   | "value-domain"
+  | "dictionary"
   | "metric"
   | "concept"
   | "contradiction"
@@ -51,13 +52,28 @@ export type LlmClient = {
   complete(prompt: string): Promise<string>;
 };
 
+/** skip = large/encrypted/empty; range = time/snowflake/autoincrement; domain = full value set. */
+export type ColumnLane = "skip" | "range" | "domain";
+
 export type DatabaseColumnSnapshot = {
   name: string;
   type: string;
   nullable: boolean;
   comment?: string;
   primaryKey?: boolean;
+  unique?: boolean;
+  autoIncrement?: boolean;
+  encrypted?: boolean;
+  lane?: ColumnLane;
+  /** Packed MinHash (k hashes + cardinality). Omitted for skip/encrypted columns. */
+  sketch?: number[];
   samples?: string[];
+  valueCounts?: Array<{ value: string; count: number }>;
+  rowCount?: number;
+  cardinality?: number;
+  nullRate?: number;
+  min?: string;
+  max?: string;
 };
 
 export type DatabaseForeignKey = {
@@ -72,11 +88,39 @@ export type DatabaseTableSnapshot = {
   columns: DatabaseColumnSnapshot[];
   foreignKeys?: DatabaseForeignKey[];
   sampleRows?: Array<Record<string, unknown>>;
+  /** Set once a table's profile and values have been collected, so a later scan can skip it. */
+  profiled?: boolean;
+};
+
+export type SnapshotRelationMeasurement = {
+  left: string;
+  right: string;
+  score: number;
+  overlap: number;
+  name: number;
+  comment: number;
+  keyShape: number;
+  parentIsKey: boolean;
+  veto: boolean;
 };
 
 export type DatabaseSnapshot = {
   dialect?: string;
   tables: DatabaseTableSnapshot[];
+  measuredRelations?: SnapshotRelationMeasurement[];
+};
+
+export type WikiScanProgress = {
+  stage: "schema" | "table" | "values" | "relations" | "compile" | "semantic";
+  table?: string;
+  tableIndex?: number;
+  tableCount?: number;
+  relationIndex?: number;
+  relationCount?: number;
+  completedTables?: string[];
+  factsDone?: boolean;
+  relationsDone?: boolean;
+  message?: string;
 };
 
 export type WikiPage = {

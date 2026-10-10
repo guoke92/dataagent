@@ -12,7 +12,6 @@ tags:
   - 指标
 allowed-tools:
   - list_data_sources
-  - inspect_schema
   - recall_wiki
   - lookup_values
   - preview_table
@@ -34,10 +33,9 @@ Chinese search aliases: 数据分析, 查数, 指标查询, 报表, SQL 分析, 
 This workflow is adapted for this workbench from public data-analysis skill patterns:
 
 - The selected datasource outline is already in the prompt. Do not call a tool to discover which tables exist.
-- Call `recall_wiki` with the user's question before `inspect_schema` or SQL. Hits are the only knowledge surface.
-  Logical pages name tables, relations, and value domains. Semantic pages explain those anchors. Raw documents are not retrieved.
-- Call `inspect_schema` only to obtain a `schema_id`, and pass only the table names recall already identified.
-- Call `lookup_values` only for an open literal that recall did not label. A hit is evidence, not a confirmed filter.
+- Call `recall_wiki` with the user's question. It returns `schema_id`, value links, semantic hits, and the logical tables and relations.
+- Pass that `schema_id` to SQL. Do not make a second call to obtain it.
+- Call `lookup_values` only for one literal you still need to check. A hit is evidence, not a confirmed filter.
 - Retrieve only the data needed for the current question.
 - Validate results before presenting them.
 - Match the output to the user's requested level of detail.
@@ -63,10 +61,8 @@ being scanned.
 
 Use progressive disclosure:
 
-- Start with `recall_wiki`. It covers both executable facts and business definitions.
-- Then use datasource and schema discovery (`list_data_sources` / `inspect_schema`).
-- Narrow to candidate tables and columns.
-- Inspect only the specific tables needed for the query.
+- Start with `recall_wiki`. Use `values` for literals, `semantic` for terms and rules, and `logical` for tables, dictionary labels, and relations.
+- Use `list_data_sources` only when the datasource is still unknown.
 - Use confirmed relations when a question crosses tables.
 - A schema card is a recall slice of the column, not a second description. Identifiers come back as name and business label. Measures and dates include range. Confirmed dictionaries include clean `labels` (enum values only). Other columns include a few examples.
 - Use `lookup_values` for an open literal. A hit is evidence, not a confirmed WHERE. If the name and the value land on different columns, ask for clarification.
@@ -79,7 +75,7 @@ Do not dump broad schemas into the answer. Keep schema exploration focused on th
 
 Write precise `SELECT` or `WITH` SQL through `run_sql_readonly`.
 
-Use exact inspected table and column names. If a query fails, inspect the schema or simplify the query before retrying.
+Use exact table and column names from `logical`. If a query fails, simplify it before retrying.
 Do not guess alternate names blindly.
 
 For multi-step analysis, break the problem into focused sub-questions. Prefer a small number of high-signal queries

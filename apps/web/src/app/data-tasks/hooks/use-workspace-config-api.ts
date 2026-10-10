@@ -68,11 +68,11 @@ export type WorkspaceApiActions = {
     kind: WorkspaceConfigKind,
     item: WorkspaceConfigItem,
     skillFile?: File,
-  ) => Promise<string>;
+  ) => Promise<{ id: string; scanJob?: JobDto }>;
   updateItem: (
     kind: WorkspaceConfigKind,
     item: WorkspaceConfigItem,
-  ) => Promise<WorkspaceConfigItem>;
+  ) => Promise<WorkspaceConfigItem & { scanJob?: JobDto }>;
   deleteItem: (kind: WorkspaceConfigKind, itemId: string) => Promise<void>;
   testItem: (kind: WorkspaceConfigKind, itemId: string) => Promise<Record<string, unknown>>;
   introspectDatasource: (itemId: string) => Promise<JobDto>;
@@ -331,7 +331,7 @@ export function useWorkspaceConfigApi(): WorkspaceApiState & WorkspaceApiActions
       kind: WorkspaceConfigKind,
       item: WorkspaceConfigItem,
       skillFile?: File,
-    ): Promise<string> => {
+      ): Promise<{ id: string; scanJob?: JobDto }> => {
       try {
         if (kind === "skill") {
           if (!skillFile) {
@@ -349,18 +349,21 @@ export function useWorkspaceConfigApi(): WorkspaceApiState & WorkspaceApiActions
             ...current,
             skill: [...current.skill, mapped],
           }));
-          return mapped.id;
+          return { id: mapped.id };
         }
 
         const body = itemToCreateBody(kind, item);
         let createdId = item.id;
+        let scanJob: JobDto | undefined;
         if (kind === "db") {
           const created = await configApi.createDatasource(body);
           createdId = created.id;
+          scanJob = created.scanJob;
           setWorkspaceConfig((current) => ({
             ...current,
             db: [...current.db, mergeItemFromDto(kind, item, created)],
           }));
+          return { id: createdId, ...(scanJob ? { scanJob } : {}) };
         } else if (kind === "kb") {
           const created = await configApi.createKnowledgeBase(body);
           createdId = created.id;
@@ -383,7 +386,7 @@ export function useWorkspaceConfigApi(): WorkspaceApiState & WorkspaceApiActions
             llm: [...current.llm, mergeItemFromDto(kind, item, created)],
           }));
         }
-        return createdId;
+        return { id: createdId };
       } catch (err) {
         throw formatConfigActionError(err);
       }
@@ -395,14 +398,14 @@ export function useWorkspaceConfigApi(): WorkspaceApiState & WorkspaceApiActions
     async (
       kind: WorkspaceConfigKind,
       item: WorkspaceConfigItem,
-    ): Promise<WorkspaceConfigItem> => {
+    ): Promise<WorkspaceConfigItem & { scanJob?: JobDto }> => {
       const body = itemToPatchBody(kind, item);
       try {
         if (kind === "db") {
           const updated = await configApi.patchDatasource(item.id, body);
           const merged = mergeItemFromDto(kind, item, updated);
           replaceItemInStore(kind, merged);
-          return merged;
+          return updated.scanJob ? { ...merged, scanJob: updated.scanJob } : merged;
         }
         if (kind === "kb") {
           const updated = await configApi.patchKnowledgeBase(item.id, body);
@@ -562,19 +565,25 @@ export function useWorkspaceConfigApi(): WorkspaceApiState & WorkspaceApiActions
 
   const pollJob = useCallback(
     async (jobId: string, onUpdate?: (job: JobDto) => void): Promise<JobDto> => {
-      for (let attempt = 0; attempt < 120; attempt += 1) {
-        const job = await configApi.getJob(jobId);
-        onUpdate?.(job);
-        if (
-          job.status === "completed" ||
-          job.status === "failed" ||
-          job.status === "canceled"
-        ) {
-          return job;
+      let failures = 0;
+      for (;;) {
+        try {
+          const job = await configApi.getJob(jobId);
+          failures = 0;
+          onUpdate?.(job);
+          if (
+            job.status === "completed" ||
+            job.status === "failed" ||
+            job.status === "canceled"
+          ) {
+            return job;
+          }
+        } catch (error) {
+          failures += 1;
+          if (failures >= 8) throw error;
         }
-        await sleep(500);
+        await sleep(800);
       }
-      throw new Error("The job timed out. Check the job list for status later.");
     },
     [],
   );

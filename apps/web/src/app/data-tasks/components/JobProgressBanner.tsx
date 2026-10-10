@@ -1,100 +1,126 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { JobDto } from "../../../lib/config-api";
-import { useT } from "../../../i18n/locale-context";
-import { statusTone } from "../ui-tokens";
+import { useLocale, useT } from "../../../i18n/locale-context";
+import type { TranslateFn } from "../../../i18n/types";
 
-export function JobProgressBanner({
+export function isLiveJob(job: JobDto | null | undefined): boolean {
+  return job?.status === "pending" || job?.status === "queued" || job?.status === "running";
+}
+
+export function jobStageMessage(job: JobDto | null | undefined): string {
+  const result = job?.result;
+  if (!result || typeof result !== "object") return "";
+  const message = result.message;
+  return typeof message === "string" ? message : "";
+}
+
+export function assertJobFinished(job: JobDto, t: TranslateFn): void {
+  if (job.status === "failed") {
+    throw new Error(job.error?.message || t("wiki.scanFailed"));
+  }
+  if (job.status === "canceled") {
+    throw new Error(t("wiki.scanCanceled"));
+  }
+}
+
+export function formatRelativeTime(
+  iso: string | null | undefined,
+  t: TranslateFn,
+  locale: string,
+): string {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  const delta = Date.now() - date.getTime();
+  if (delta < 45_000) return t("wiki.justNow");
+  if (delta < 3_600_000) {
+    return t("wiki.minutesAgo", { count: Math.max(1, Math.floor(delta / 60_000)) });
+  }
+  if (delta < 86_400_000) {
+    return t("wiki.hoursAgo", { count: Math.max(1, Math.floor(delta / 3_600_000)) });
+  }
+  if (delta < 7 * 86_400_000) {
+    return t("wiki.daysAgo", { count: Math.max(1, Math.floor(delta / 86_400_000)) });
+  }
+  return date.toLocaleString(locale === "zh-CN" ? "zh-CN" : "en-US", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+export function JobInlineStatus({
   job,
+  updatedAt,
   onCancel,
-  onDismiss,
 }: {
-  job: JobDto | null;
+  job?: JobDto | null;
+  updatedAt?: string | null;
   onCancel?: (jobId: string) => void | Promise<void>;
-  onDismiss?: () => void;
 }) {
   const t = useT();
+  const { locale } = useLocale();
   const [busy, setBusy] = useState(false);
+  const live = isLiveJob(job);
+  const stage = jobStageMessage(job);
+  const finishedAt = job?.finished_at || updatedAt;
+  const relative = formatRelativeTime(finishedAt, t, locale);
 
-  useEffect(() => {
-    if (!job) return;
-    if (job.status === "completed" || job.status === "failed" || job.status === "canceled") {
-      const timer = window.setTimeout(() => onDismiss?.(), 4000);
-      return () => window.clearTimeout(timer);
-    }
-    return undefined;
-  }, [job, onDismiss]);
+  if (live && job) {
+    return (
+      <span className="inline-flex min-w-0 items-center gap-1.5 text-[11px] text-sky-800">
+        <SpinnerIcon />
+        <span className="truncate">
+          {t("jobs.statusProgress", {
+            status: job.status === "running" ? t("common.running") : t("jobs.queued"),
+            progress: job.progress,
+          })}
+          {stage ? ` · ${stage}` : ""}
+        </span>
+        {onCancel ? (
+          <button
+            type="button"
+            disabled={busy}
+            className="shrink-0 text-[11px] font-medium text-sky-700 underline-offset-2 hover:underline disabled:opacity-50"
+            onClick={() => {
+              setBusy(true);
+              void Promise.resolve(onCancel(job.id)).finally(() => setBusy(false));
+            }}
+          >
+            {t("common.cancel")}
+          </button>
+        ) : null}
+      </span>
+    );
+  }
 
-  if (!job) return null;
+  if (job?.status === "failed") {
+    return (
+      <span className="truncate text-[11px] text-rose-700">
+        {job.error?.message || t("wiki.scanFailed")}
+      </span>
+    );
+  }
 
-  const statusLabel: Record<JobDto["status"], string> = {
-    pending: t("jobs.queued"),
-    running: t("common.running"),
-    completed: t("common.completed"),
-    failed: t("common.failed"),
-    canceled: t("common.canceled"),
-  };
+  if (relative) {
+    return (
+      <span className="truncate text-[11px] text-muted-light">
+        {t("wiki.updatedAt", { time: relative })}
+      </span>
+    );
+  }
 
-  const tone =
-    job.status === "completed"
-      ? statusTone("success")
-      : job.status === "failed"
-        ? statusTone("error")
-        : job.status === "canceled"
-          ? statusTone("muted")
-          : statusTone("info");
+  return null;
+}
 
+function SpinnerIcon() {
   return (
-    <div className={`rounded-xl border px-4 py-3 ${tone}`}>
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="text-sm font-semibold">
-            {job.type === "datasource-introspect" ? t("jobs.schemaSync") : t("jobs.indexRebuild")}
-          </div>
-          <div className="mt-1 text-xs opacity-80">
-            {statusLabel[job.status]} · {job.progress}%
-          </div>
-          {job.result ? (
-            <pre className="mt-2 max-h-24 overflow-auto rounded border border-border/60 bg-surface/70 p-2 text-[11px] leading-4">
-              {JSON.stringify(job.result, null, 2)}
-            </pre>
-          ) : null}
-        </div>
-        <div className="flex shrink-0 gap-2">
-          {(job.status === "pending" || job.status === "running") && onCancel ? (
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => {
-                setBusy(true);
-                void Promise.resolve(onCancel(job.id)).finally(() => setBusy(false));
-              }}
-              className="rounded-lg border border-current/20 px-2 py-1 text-xs font-medium"
-            >
-              {t("common.cancel")}
-            </button>
-          ) : null}
-          {(job.status === "completed" ||
-            job.status === "failed" ||
-            job.status === "canceled") &&
-          onDismiss ? (
-            <button
-              type="button"
-              onClick={onDismiss}
-              className="rounded-lg border border-current/20 px-2 py-1 text-xs font-medium"
-            >
-              {t("common.close")}
-            </button>
-          ) : null}
-        </div>
-      </div>
-      <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-surface/60">
-        <div
-          className="h-full rounded-full bg-current transition-all"
-          style={{ width: `${Math.max(0, Math.min(100, job.progress))}%` }}
-        />
-      </div>
-    </div>
+    <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 shrink-0 animate-spin" fill="none" stroke="currentColor" strokeWidth={2}>
+      <circle cx="12" cy="12" r="8" className="opacity-25" />
+      <path d="M20 12a8 8 0 0 0-8-8" strokeLinecap="round" />
+    </svg>
   );
 }

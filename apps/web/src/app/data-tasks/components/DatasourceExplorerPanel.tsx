@@ -6,8 +6,9 @@ import type {
   DatasourceSchemaDto,
   DatasourceSchemaTableDto,
   DatasourceTablePreviewDto,
+  JobDto,
 } from "../../../lib/config-api";
-import { useT } from "../../../i18n/locale-context";
+import { useLocale, useT } from "../../../i18n/locale-context";
 import type { TranslateFn } from "../../../i18n/types";
 import { normalizeSqlTable } from "../table-rows";
 import type { WorkspaceConfigItem } from "../data-task-state";
@@ -16,6 +17,7 @@ import {
 } from "../datasource-metadata";
 import { DatasourceTypeIcon } from "./DatasourceTypeIcon";
 import { btnSecondaryClass } from "../ui-tokens";
+import { JobInlineStatus, formatRelativeTime, isLiveJob } from "./JobProgressBanner";
 
 type DatasourceExplorerPanelProps = {
   item: WorkspaceConfigItem;
@@ -23,6 +25,8 @@ type DatasourceExplorerPanelProps = {
   onEdit: () => void;
   onTest?: () => Promise<void>;
   onIntrospect?: () => Promise<void>;
+  scanJob?: JobDto | null;
+  onCancelScan?: (jobId: string) => void | Promise<void>;
 };
 
 type ExplorerTab = "columns" | "data" | "info";
@@ -67,8 +71,11 @@ export function DatasourceExplorerPanel({
   onEdit,
   onTest,
   onIntrospect,
+  scanJob,
+  onCancelScan,
 }: DatasourceExplorerPanelProps) {
   const t = useT();
+  const { locale } = useLocale();
   const [schema, setSchema] = useState<DatasourceSchemaDto | null>(null);
   const [query, setQuery] = useState("");
   const [selectedTableName, setSelectedTableName] = useState("");
@@ -79,7 +86,39 @@ export function DatasourceExplorerPanel({
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
-  const [actionStatus, setActionStatus] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [localJob, setLocalJob] = useState<JobDto | null>(null);
+  const [localJobSource, setLocalJobSource] = useState(item.id);
+  const parentJob = scanJob && (scanJob.resource_id === item.id || scanJob.resourceId === item.id)
+    ? scanJob
+    : null;
+  const serverJob = localJobSource === item.id ? localJob : null;
+  const boundScanJob = serverJob ?? parentJob;
+  const scanLive = isLiveJob(boundScanJob);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer = 0;
+    const tick = async () => {
+      try {
+        const result = await configApi.getWikiScanJob(item.id);
+        if (!cancelled) {
+          setLocalJobSource(item.id);
+          setLocalJob(result.job);
+        }
+      } catch {
+        if (!cancelled) setLocalJob(null);
+      }
+    };
+    void tick();
+    timer = window.setInterval(() => {
+      void tick();
+    }, 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [item.id]);
 
   const settings = item.settings ?? {};
   const type = settings.type ?? "unknown";
@@ -114,6 +153,7 @@ export function DatasourceExplorerPanel({
       const next = await configApi.getDatasourceSchema(item.id, {
         q: query.trim() || undefined,
         includeStats: true,
+        refresh: true,
       });
       setSchema(next);
       const firstName = next.tables[0] ? tableNameOf(next.tables[0]) : "";
@@ -157,12 +197,17 @@ export function DatasourceExplorerPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [item.id]);
 
+  const previewColumns = Array.isArray(preview?.columns) ? preview.columns : [];
+  const previewRows = Array.isArray(preview?.rows) ? preview.rows : [];
   const previewTable = preview
-    ? normalizeSqlTable(preview.columns.map((column) => column.name), preview.rows)
+    ? normalizeSqlTable(
+      previewColumns.map((column) => typeof column === "string" ? column : column?.name ?? ""),
+      previewRows,
+    )
     : null;
 
   return (
-    <section className="flex min-h-[640px] flex-col overflow-hidden rounded-2xl border border-border bg-white shadow-[var(--shadow-card)]">
+    <section className="flex h-full min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-border bg-white shadow-[var(--shadow-card)]">
       <header className="flex flex-wrap items-center gap-3 border-b border-border bg-slate-50 px-4 py-3">
         <button type="button" onClick={onBack} className={btnSecondaryClass}>
           {t("common.back")}
@@ -176,6 +221,7 @@ export function DatasourceExplorerPanel({
           <h3 className="truncate text-base font-semibold text-slate-950">{item.name}</h3>
           <p className="truncate text-xs text-slate-500">
             {type} · {summarizeDatasourceConnection(item)}
+            {schema?.inspectedAt ? ` · ${t("wiki.updatedAt", { time: formatRelativeTime(schema.inspectedAt, t, locale) })}` : ""}
           </p>
         </div>
         <span className="rounded-full border border-border bg-white px-2.5 py-1 text-[11px] font-medium text-slate-500">
@@ -195,41 +241,51 @@ export function DatasourceExplorerPanel({
           </button>
         ) : null}
         {onIntrospect ? (
-          <button
-            type="button"
-            disabled={actionBusy}
-            onClick={() => {
-              setActionBusy(true);
-              setActionStatus(t("wiki.recompileRunning"));
-              void onIntrospect()
-                .then(() => {
-                  setActionStatus(t("wiki.recompileDone"));
-                  return loadSchema();
-                })
-                .catch(() => setActionStatus(t("wiki.loadFailed")))
-                .finally(() => setActionBusy(false));
-            }}
-            className={`${btnSecondaryClass} disabled:opacity-50`}
-          >
-            {actionBusy ? t("wiki.recompileRunning") : actionStatus === t("wiki.recompileDone") ? t("wiki.recompileDone") : t("wiki.recompile")}
-          </button>
+          <div className="flex min-w-0 max-w-md flex-col items-end gap-1">
+            <button
+              type="button"
+              disabled={actionBusy || scanLive}
+              onClick={() => {
+                setActionBusy(true);
+                setActionError(null);
+                void onIntrospect()
+                  .then(() => loadSchema())
+                  .catch((error) => {
+                    setActionError(error instanceof Error ? error.message : t("wiki.loadFailed"));
+                  })
+                  .finally(() => setActionBusy(false));
+              }}
+              className={`${btnSecondaryClass} inline-flex items-center gap-1.5 disabled:opacity-50`}
+            >
+              {actionBusy || scanLive ? (
+                <>
+                  <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                  {t("wiki.recompileRunning")}
+                  {boundScanJob ? ` ${boundScanJob.progress}%` : ""}
+                </>
+              ) : t("wiki.recompile")}
+            </button>
+            <JobInlineStatus
+              job={boundScanJob}
+              updatedAt={schema?.inspectedAt ?? boundScanJob?.finished_at}
+              onCancel={onCancelScan}
+            />
+            {actionError ? <span className="text-[11px] text-rose-700">{actionError}</span> : null}
+          </div>
         ) : null}
         <button type="button" onClick={onEdit} className={btnSecondaryClass}>
           {t("common.edit")}
         </button>
       </header>
 
-      {actionStatus ? (
-        <div className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-900">{actionStatus}</div>
-      ) : null}
       {notice ? (
         <div className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-800">
           {notice}
         </div>
       ) : null}
 
-      <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[280px_minmax(0,1fr)]">
-        <aside className="min-h-0 border-b border-border bg-slate-50/70 p-3 lg:border-b-0 lg:border-r">
+      <div className="grid h-full min-h-0 flex-1 grid-cols-1 lg:grid-cols-[280px_minmax(0,1fr)]">
+        <aside className="flex min-h-0 flex-col overflow-hidden border-b border-border bg-slate-50/70 p-3 lg:h-full lg:border-b-0 lg:border-r">
           <div className="flex gap-2">
             <input
               value={query}
@@ -251,7 +307,7 @@ export function DatasourceExplorerPanel({
               {schemaError}
             </p>
           ) : null}
-          <div className="mt-3 max-h-[520px] space-y-1 overflow-y-auto">
+          <div className="mt-3 min-h-0 flex-1 space-y-1 overflow-y-auto">
             {filteredTables.length === 0 ? (
               <p className="rounded-lg border border-dashed border-border bg-white p-3 text-xs text-slate-500">
                 {schema ? t("explorer.noMatchingObjects") : t("explorer.loadSchemaHint")}
@@ -290,7 +346,7 @@ export function DatasourceExplorerPanel({
           </div>
         </aside>
 
-        <main className="min-w-0 overflow-hidden p-4">
+        <main className="flex min-h-0 min-w-0 flex-col overflow-hidden p-4">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
             <div className="min-w-0">
               <h4 className="truncate text-sm font-semibold text-slate-950">
@@ -322,7 +378,7 @@ export function DatasourceExplorerPanel({
           </div>
 
           {activeTab === "columns" ? (
-            <div className="overflow-auto rounded-xl border border-border">
+            <div className="min-h-0 flex-1 overflow-auto rounded-xl border border-border">
               <table className="w-full min-w-[640px] text-left text-xs">
                 <thead className="bg-slate-50 text-slate-500">
                   <tr>
@@ -338,18 +394,7 @@ export function DatasourceExplorerPanel({
                       <td className="px-3 py-2 font-mono font-medium text-slate-900">{column.name}</td>
                       <td className="px-3 py-2 font-mono text-slate-600">{column.type || "-"}</td>
                       <td className="px-3 py-2 text-slate-500">{column.nullable === false ? t("common.no") : t("common.yes")}</td>
-                      <td className="px-3 py-2 text-slate-500">
-                        <span className="block">{column.description || "-"}</span>
-                        {column.labels?.length ? (
-                          <span className="mt-1 block text-[10px] text-slate-400">{column.labels.join(", ")}</span>
-                        ) : null}
-                        {column.range ? (
-                          <span className="mt-1 block text-[10px] text-slate-400">{column.range}</span>
-                        ) : null}
-                        {column.examples?.length ? (
-                          <span className="mt-1 block text-[10px] text-slate-400">{column.examples.join(", ")}</span>
-                        ) : null}
-                      </td>
+                      <td className="px-3 py-2 text-slate-500">{column.description || "-"}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -375,7 +420,6 @@ export function DatasourceExplorerPanel({
               {previewError ? (
                 <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-3 text-xs leading-5 text-amber-900">
                   {previewError}
-                  <div className="mt-1 font-medium">{t("explorer.previewEndpointPending")}</div>
                 </div>
               ) : null}
               {previewTable ? (
@@ -403,7 +447,7 @@ export function DatasourceExplorerPanel({
                     </tbody>
                   </table>
                   <div className="border-t border-border bg-slate-50 px-3 py-2 text-[11px] text-slate-500">
-                    {preview?.total !== undefined
+                    {typeof preview?.total === "number"
                       ? t("explorer.totalRows", { count: preview.total.toLocaleString() })
                       : t("explorer.totalUnknown")}
                     {preview?.hasMore ? t("explorer.moreRows") : ""}

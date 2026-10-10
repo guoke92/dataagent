@@ -79,7 +79,16 @@ export async function proxyToApi(request: Request, pathname: string): Promise<Re
     init.body = await request.arrayBuffer();
   }
 
-  const upstream = await fetch(targetUrl, init);
+  let upstream: Response;
+  try {
+    upstream = await fetch(targetUrl, init);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Upstream request failed";
+    return Response.json(
+      { success: false, error: { code: "INTERNAL_ERROR", message } },
+      { status: 502 },
+    );
+  }
   const responseHeaders = buildProxyResponseHeaders(upstream.headers, pathname);
 
   return new Response(upstream.body, {

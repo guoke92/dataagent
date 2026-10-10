@@ -17,7 +17,7 @@ import { LocalArtifactService, SessionOutputService } from "@datafoundry/artifac
 import { type MeResponse, createEnvConfig, createErrorResult, createSuccessResult } from "@datafoundry/contracts";
 import { LocalDataGateway } from "@datafoundry/data-gateway";
 import { LocalFileAssetService } from "@datafoundry/files";
-import { LocalKnowledgeService, OpenAICompatibleEmbeddingService } from "@datafoundry/knowledge";
+import { LocalKnowledgeService } from "@datafoundry/knowledge";
 import { ensureWikiSchema, LlmWiki } from "@datafoundry/llm-wiki";
 import {
   RunEventWriter,
@@ -39,6 +39,7 @@ import { fileURLToPath } from "node:url";
 import { Observable } from "rxjs";
 
 import { handleConfigApiRequest } from "./config-api.js";
+import { WikiScanRunner } from "./wiki-scan.js";
 import { createAsyncMemoByKey, createStartupTimer } from "./async-memo.js";
 import { ensureBuiltinDtcGrowthDatasource } from "./builtin-dtc-growth-datasource.js";
 import { reclaimOrphanedQueuedAndRunningRuns } from "./stale-active-runs.js";
@@ -195,17 +196,7 @@ export const createServer = async (options: CreateServerOptions = {}): Promise<S
     INSERT OR IGNORE INTO schema_migrations (id, description, applied_at)
     VALUES (?, ?, ?)
   `).run("0019_wiki_knowledge", "Wiki knowledge tables in the product database", new Date().toISOString());
-  const embeddingService = new OpenAICompatibleEmbeddingService();
-  const llmWiki = new LlmWiki(metadataStore.db, envConfig.embedding.api_key ? {
-    embedder: {
-      embed: (texts) => embeddingService.embed(texts, {
-        provider: envConfig.embedding.provider,
-        model: envConfig.embedding.model,
-        base_url: envConfig.embedding.base_url,
-        api_key: envConfig.embedding.api_key ?? ""
-      })
-    }
-  } : undefined);
+  const llmWiki = new LlmWiki(metadataStore.db);
   const knowledgeService = new LocalKnowledgeService(metadataStore, {
     embedding: {
       provider: envConfig.embedding.provider,
@@ -223,6 +214,7 @@ export const createServer = async (options: CreateServerOptions = {}): Promise<S
       { conversationMemoryMode }
     );
   const runCancelRegistry = new RunCancelRegistry();
+  const wikiScanRunner = new WikiScanRunner();
   const authService = new AuthService(metadataStore, authConfig);
 
   const taskStateRuntime = await timer.measure("mastra_runtime", () => taskStateRuntimePromise);
@@ -310,7 +302,8 @@ export const createServer = async (options: CreateServerOptions = {}): Promise<S
         runCancelRegistry,
         userId: authContext.user.id,
         workspaceId: authContext.workspaceId,
-        llmWiki
+        llmWiki,
+        wikiScanRunner
       });
       if (configResponse) {
         if (Buffer.isBuffer(configResponse.body)) {

@@ -7,7 +7,7 @@ export const AUTHORITY: Record<ClaimDomain, readonly SourceKind[]> = {
   terminology: ["document", "database", "dialogue"],
   business_rule: ["code", "document"],
   field_relation: ["code", "database", "document"],
-  enum_dictionary: ["code", "document"],
+  enum_dictionary: ["code", "document", "database"],
   term_bridge: ["code"],
   query_pattern: ["dialogue"]
 };
